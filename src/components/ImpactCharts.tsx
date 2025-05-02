@@ -3,7 +3,7 @@ import React from 'react';
 import { Card } from '@/components/ui/card';
 import { 
   BarChart, Bar, XAxis, YAxis, ResponsiveContainer, 
-  PieChart, Pie, Cell, Tooltip
+  PieChart, Pie, Cell, Tooltip, Legend
 } from 'recharts';
 
 type Prompt = {
@@ -127,7 +127,7 @@ const ImpactCharts = ({ prompts }: ImpactChartsProps) => {
               />
               <Tooltip 
                 formatter={(value) => {
-                  return typeof value === 'number' ? [`${value.toFixed(2)}`, ''] : [value, ''];
+                  return typeof value === 'number' ? [`${value.toFixed(2)}`, ''] : ['0', ''];
                 }}
                 labelFormatter={(label) => `Date: ${label}`}
                 contentStyle={{ fontSize: '11px' }}
@@ -152,8 +152,8 @@ const ImpactCharts = ({ prompts }: ImpactChartsProps) => {
                   outerRadius={40}
                   paddingAngle={5}
                   dataKey="value"
-                  label={({ name }) => name}
-                  labelLine={false}
+                  nameKey="name"
+                  label={false}
                 >
                   {modelData.map((entry, index) => (
                     <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
@@ -162,6 +162,18 @@ const ImpactCharts = ({ prompts }: ImpactChartsProps) => {
                 <Tooltip 
                   formatter={(value, name, props) => [`${value} prompts`, props.payload.name]}
                   contentStyle={{ fontSize: '11px' }}
+                />
+                <Legend 
+                  layout="vertical" 
+                  align="center" 
+                  verticalAlign="bottom"
+                  iconSize={8}
+                  iconType="circle"
+                  formatter={(value) => {
+                    // Truncate long model names
+                    return value.length > 8 ? `${value.substring(0, 7)}...` : value;
+                  }}
+                  wrapperStyle={{ fontSize: '9px', paddingTop: '5px' }}
                 />
               </PieChart>
             </ResponsiveContainer>
@@ -181,8 +193,8 @@ const ImpactCharts = ({ prompts }: ImpactChartsProps) => {
                   outerRadius={40}
                   paddingAngle={5}
                   dataKey="value"
-                  label={({ name }) => name}
-                  labelLine={false}
+                  nameKey="name"
+                  label={false}
                 >
                   {siteData.map((entry, index) => (
                     <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
@@ -191,6 +203,18 @@ const ImpactCharts = ({ prompts }: ImpactChartsProps) => {
                 <Tooltip 
                   formatter={(value, name, props) => [`${value} prompts`, props.payload.name]}
                   contentStyle={{ fontSize: '11px' }}
+                />
+                <Legend 
+                  layout="vertical" 
+                  align="center" 
+                  verticalAlign="bottom"
+                  iconSize={8}
+                  iconType="circle"
+                  formatter={(value) => {
+                    // Truncate long site names
+                    return value.length > 8 ? `${value.substring(0, 7)}...` : value;
+                  }}
+                  wrapperStyle={{ fontSize: '9px', paddingTop: '5px' }}
                 />
               </PieChart>
             </ResponsiveContainer>
