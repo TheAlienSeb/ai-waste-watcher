@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { Card } from '@/components/ui/card';
 import { 
@@ -138,89 +137,85 @@ const ImpactCharts = ({ prompts }: ImpactChartsProps) => {
         </div>
       </Card>
 
-      <div className="grid grid-cols-2 gap-3">
-        <Card className="p-3 bg-white/60 backdrop-blur-sm">
-          <h3 className="text-sm font-medium mb-2">Models Used</h3>
-          <div className="h-[120px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={modelData}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={25}
-                  outerRadius={40}
-                  paddingAngle={5}
-                  dataKey="value"
-                  nameKey="name"
-                  label={false}
-                >
-                  {modelData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip 
-                  formatter={(value, name, props) => [`${value} prompts`, props.payload.name]}
-                  contentStyle={{ fontSize: '11px' }}
-                />
-                <Legend 
-                  layout="vertical" 
-                  align="center" 
-                  verticalAlign="bottom"
-                  iconSize={8}
-                  iconType="circle"
-                  formatter={(value) => {
-                    // Truncate long model names
-                    return value.length > 8 ? `${value.substring(0, 7)}...` : value;
-                  }}
-                  wrapperStyle={{ fontSize: '9px', paddingTop: '5px' }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
+      {/* Make Models Used larger and full width */}
+      <Card className="p-3 bg-white/60 backdrop-blur-sm">
+        <h3 className="text-sm font-medium mb-2">Models Used</h3>
+        <div className="h-[180px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie
+                data={modelData}
+                cx="50%"
+                cy="50%"
+                innerRadius={30}
+                outerRadius={50}
+                paddingAngle={5}
+                dataKey="value"
+                nameKey="name"
+                label={false}
+              >
+                {modelData.map((entry, index) => (
+                  <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                ))}
+              </Pie>
+              <Tooltip 
+                formatter={(value, name, props) => [`${value} prompts`, props.payload.name]}
+                contentStyle={{ fontSize: '12px' }}
+              />
+              <Legend 
+                layout="horizontal" 
+                align="center" 
+                verticalAlign="bottom"
+                iconSize={10}
+                iconType="circle"
+                formatter={(value) => value}
+                wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }}
+              />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+      </Card>
         
-        <Card className="p-3 bg-white/60 backdrop-blur-sm">
-          <h3 className="text-sm font-medium mb-2">Sites Used</h3>
-          <div className="h-[120px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={siteData}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={25}
-                  outerRadius={40}
-                  paddingAngle={5}
-                  dataKey="value"
-                  nameKey="name"
-                  label={false}
-                >
-                  {siteData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip 
-                  formatter={(value, name, props) => [`${value} prompts`, props.payload.name]}
-                  contentStyle={{ fontSize: '11px' }}
-                />
-                <Legend 
-                  layout="vertical" 
-                  align="center" 
-                  verticalAlign="bottom"
-                  iconSize={8}
-                  iconType="circle"
-                  formatter={(value) => {
-                    // Truncate long site names
-                    return value.length > 8 ? `${value.substring(0, 7)}...` : value;
-                  }}
-                  wrapperStyle={{ fontSize: '9px', paddingTop: '5px' }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
-      </div>
+      <Card className="p-3 bg-white/60 backdrop-blur-sm">
+        <h3 className="text-sm font-medium mb-2">Sites Used</h3>
+        <div className="h-[120px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie
+                data={siteData}
+                cx="50%"
+                cy="50%"
+                innerRadius={25}
+                outerRadius={40}
+                paddingAngle={5}
+                dataKey="value"
+                nameKey="name"
+                label={false}
+              >
+                {siteData.map((entry, index) => (
+                  <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                ))}
+              </Pie>
+              <Tooltip 
+                formatter={(value, name, props) => [`${value} prompts`, props.payload.name]}
+                contentStyle={{ fontSize: '11px' }}
+              />
+              <Legend 
+                layout="vertical" 
+                align="center" 
+                verticalAlign="bottom"
+                iconSize={8}
+                iconType="circle"
+                formatter={(value) => {
+                  // Truncate long site names
+                  return value.length > 8 ? `${value.substring(0, 7)}...` : value;
+                }}
+                wrapperStyle={{ fontSize: '9px', paddingTop: '5px' }}
+              />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+      </Card>
     </div>
   );
 };
