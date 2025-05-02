@@ -21,12 +21,24 @@ declare namespace chrome {
       [key: string]: StorageChange;
     };
     
-    function onChanged(callback: (changes: StorageChanges, areaName: string) => void): void;
+    // Change this from a function to an event (object with addListener method)
+    interface StorageChangeEvent {
+      addListener(callback: (changes: StorageChanges, areaName: string) => void): void;
+      removeListener(callback: (changes: StorageChanges, areaName: string) => void): void;
+      hasListener(callback: (changes: StorageChanges, areaName: string) => void): boolean;
+    }
+    
+    const onChanged: StorageChangeEvent;
   }
   
   namespace runtime {
+    interface MessageEvent {
+      addListener(callback: (message: any, sender: any, sendResponse: (response?: any) => void) => void | boolean): void;
+      removeListener(callback: (message: any, sender: any, sendResponse: (response?: any) => void) => void | boolean): void;
+    }
+    
     function sendMessage(message: any, responseCallback?: (response: any) => void): void;
-    function onMessage(callback: (message: any, sender: any, sendResponse: (response?: any) => void) => void | boolean): void;
+    const onMessage: MessageEvent;
   }
   
   namespace tabs {
@@ -39,13 +51,23 @@ declare namespace chrome {
       active: boolean;
     }
     
+    interface UpdateEvent {
+      addListener(callback: (tabId: number, changeInfo: object, tab: Tab) => void): void;
+      removeListener(callback: (tabId: number, changeInfo: object, tab: Tab) => void): void;
+    }
+    
     function query(queryInfo: object, callback: (result: Tab[]) => void): void;
-    function onUpdated(callback: (tabId: number, changeInfo: object, tab: Tab) => void): void;
+    const onUpdated: UpdateEvent;
     function sendMessage(tabId: number, message: any, responseCallback?: (response: any) => void): void;
   }
   
   namespace webNavigation {
-    function onCompleted(callback: (details: object) => void): void;
+    interface CompletedEvent {
+      addListener(callback: (details: object) => void): void;
+      removeListener(callback: (details: object) => void): void;
+    }
+    
+    const onCompleted: CompletedEvent;
   }
 }
 
