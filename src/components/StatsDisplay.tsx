@@ -16,10 +16,13 @@ type StatsDisplayProps = {
 };
 
 const StatsDisplay = ({ stats, formatNumber }: StatsDisplayProps) => {
-  // Calculate cost of energy (approximation)
-  // Average electricity cost is around $0.15 per kWh
+  // Calculate cost of energy based on the new formula from the research
+  // For a typical query: ~0.3 watt-hours per 500 token response
+  // We'll use a conversion factor of 3600000 to convert from Joules to watt-hours
   // 1 kWh = 3,600,000 Joules
-  const energyCost = (stats.energyConsumption / 3600000) * 0.15;
+  // Average electricity cost is around $0.15 per kWh
+  const energyInWattHours = stats.energyConsumption / 3600000;
+  const energyCost = energyInWattHours * 0.15;
   
   return (
     <div className="grid grid-cols-2 gap-3">
@@ -48,7 +51,7 @@ const StatsDisplay = ({ stats, formatNumber }: StatsDisplayProps) => {
           <div className="text-lg font-semibold">${energyCost.toFixed(6)}</div>
           <Progress value={Math.min(energyCost * 1000, 100)} className="h-1.5 mt-1 bg-yellow-100" />
           <p className="text-xs mt-1 text-yellow-600">
-            {formatNumber(stats.energyConsumption)} J ({(stats.energyConsumption / 3600).toFixed(4)} Wh)
+            {formatNumber(energyInWattHours)} Wh ({(energyInWattHours * 1000).toFixed(2)} mWh)
           </p>
         </div>
       </Card>

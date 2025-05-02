@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { Card } from '@/components/ui/card';
 import { 
@@ -140,15 +141,15 @@ const ImpactCharts = ({ prompts }: ImpactChartsProps) => {
       {/* Make Models Used larger and full width */}
       <Card className="p-3 bg-white/60 backdrop-blur-sm">
         <h3 className="text-sm font-medium mb-2">Models Used</h3>
-        <div className="h-[180px]">
+        <div className="h-[200px]">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
                 data={modelData}
                 cx="50%"
-                cy="50%"
-                innerRadius={30}
-                outerRadius={50}
+                cy="45%"
+                innerRadius={40}
+                outerRadius={70}
                 paddingAngle={5}
                 dataKey="value"
                 nameKey="name"
@@ -164,12 +165,20 @@ const ImpactCharts = ({ prompts }: ImpactChartsProps) => {
               />
               <Legend 
                 layout="horizontal" 
-                align="center" 
                 verticalAlign="bottom"
-                iconSize={10}
+                align="center"
+                iconSize={12}
                 iconType="circle"
-                formatter={(value) => value}
-                wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }}
+                wrapperStyle={{ 
+                  fontSize: '11px', 
+                  paddingTop: '15px',
+                  paddingBottom: '5px',
+                  width: '100%'
+                }}
+                formatter={(value) => {
+                  // Handle long model names more gracefully
+                  return value.length > 12 ? `${value.substring(0, 10)}...` : value;
+                }}
               />
             </PieChart>
           </ResponsiveContainer>
