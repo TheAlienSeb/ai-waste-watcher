@@ -126,7 +126,9 @@ const ImpactCharts = ({ prompts }: ImpactChartsProps) => {
                 width={30}
               />
               <Tooltip 
-                formatter={(value) => [`${value.toFixed(2)}`, '']} 
+                formatter={(value) => {
+                  return typeof value === 'number' ? [`${value.toFixed(2)}`, ''] : [value, ''];
+                }}
                 labelFormatter={(label) => `Date: ${label}`}
                 contentStyle={{ fontSize: '11px' }}
               />
