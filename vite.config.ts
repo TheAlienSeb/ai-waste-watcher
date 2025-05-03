@@ -6,6 +6,7 @@ import { crx } from "@crxjs/vite-plugin";
 import manifest from "./public/manifest.json";
 import { componentTagger } from "lovable-tagger";
 
+// https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
