@@ -1,4 +1,3 @@
-
 {
   "manifest_version": 3,
   "name": "AI Waste Watcher",
@@ -13,9 +12,15 @@
     }
   },
   "permissions": [
-    "storage",
-    "tabs",
-    "webNavigation"
+    "storage", 
+    "activeTab", 
+    "tabs", 
+    "notifications",
+    "webNavigation",
+    "scripting"
+  ],
+  "host_permissions": [
+    "*://*/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -25,13 +30,27 @@
     {
       "matches": [
         "https://chat.openai.com/*",
+        "https://chatgpt.com/*",
         "https://claude.ai/*",
         "https://perplexity.ai/*",
         "https://bard.google.com/*",
+        "https://gemini.google.com/*",
         "https://cohere.ai/*",
-        "https://www.anthropic.com/*"
+        "https://www.anthropic.com/*",
+        "https://notion.so/*",
+        "https://writesonic.com/*",
+        "https://jasper.ai/*",
+        "https://bing.com/chat*",
+        "https://you.com/*",
+        "https://huggingface.co/*",
+        "https://runwayml.com/*",
+        "https://character.ai/*",
+        "https://poe.com/*",
+        "https://cohere.com/*",
+        "https://replicate.com/*"
       ],
-      "js": ["content.js"]
+      "js": ["content.js"],
+      "run_at": "document_idle"
     }
   ],
   "icons": {
