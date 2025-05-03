@@ -6,7 +6,7 @@ import { crx, ManifestV3Export } from "@crxjs/vite-plugin";
 import rawManifest from "./public/manifest.json";
 import { componentTagger } from "lovable-tagger";
 
-// cast away the widened types
+// Cast the manifest to the expected type
 const manifest = rawManifest as unknown as ManifestV3Export;
 
 export default defineConfig(({ mode }) => ({
