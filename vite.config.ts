@@ -1,17 +1,16 @@
-
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
 import path from "path";
-import { crx } from "@crxjs/vite-plugin";
-import manifest from "./public/manifest.json";
+import { crx } from "@crxjs/vite-plugin";   // <- NEW
+import manifest from "public/manifest.json";     // <- NEW
 import { componentTagger } from "lovable-tagger";
 
-// https://vitejs.dev/config/
+
 export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
     mode === "development" && componentTagger(),
-    crx({ manifest })
+    crx({ manifest })                         // <- NEW
   ].filter(Boolean),
 
   resolve: {
@@ -19,17 +18,16 @@ export default defineConfig(({ mode }) => ({
   },
 
   build: {
-    outDir: "dist",
+    outDir: "dist",                           // where Chrome will load from
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        popup: "index.html",
-        background: "src/background.js",
-        content: "src/content.js"
+        background: "public/background.ts",
+        content: "public/content.ts"
       },
       output: {
+        // keep stable names (no hashes) so manifest matches
         entryFileNames: "[name].js",
-        chunkFileNames: "[name].js",
         assetFileNames: "[name][extname]"
       }
     }
