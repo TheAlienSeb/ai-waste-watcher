@@ -1,6 +1,6 @@
 
 
-## Project info
+## Instructions
 - clone this repo
 - npm install
 - npm run build
@@ -12,7 +12,7 @@
 - select ai-waste-watcher -> select dist
 - open dist
 
-## Go to a site like claude and see how much resources get used per prompt
+Go to a site like claude or gemini and see how much resources get used per prompt
 
 
 ## What technologies are used for this project?
