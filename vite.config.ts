@@ -11,7 +11,7 @@ export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
     mode === "development" && componentTagger(),
-    crx({ manifest: manifest })
+    crx({ manifest })
   ].filter(Boolean),
 
   resolve: {
@@ -24,8 +24,8 @@ export default defineConfig(({ mode }) => ({
     rollupOptions: {
       input: {
         popup: "index.html",
-        background: "public/background.js",
-        content: "public/content.js"
+        background: "src/background.js",
+        content: "src/content.js"
       },
       output: {
         entryFileNames: "[name].js",
