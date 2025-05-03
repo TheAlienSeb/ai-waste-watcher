@@ -1,12 +1,23 @@
+
 {
   "manifest_version": 3,
   "name": "AI Waste Watcher",
   "version": "1.0.0",
   "description": "Track the environmental impact of your AI interactions",
 
-  "action": { "default_popup": "popup.html" },
+  "action": { 
+    "default_popup": "index.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
 
-  "background": { "service_worker": "background.js", "type": "module" },
+  "background": { 
+    "service_worker": "background.js",
+    "type": "module"
+  },
 
   "content_scripts": [
     {
