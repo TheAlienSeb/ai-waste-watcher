@@ -1,15 +1,19 @@
 
 
-## Project info
+## Instructions
+- clone this repo
+- npm install
+- npm run build
+- npm run dev
+## Go to google chrome
+- go to extensions
+- turn on developer mode
+- load unpacked
+- select ai-waste-watcher -> select dist
+- open dist
 
-**URL**: https://lovable.dev/projects/4db64795-62af-40ef-a620-e3ca1dce2bdd
+Go to a site like claude or gemini and see how much resources get used per prompt
 
-
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
 
 ## What technologies are used for this project?
 
