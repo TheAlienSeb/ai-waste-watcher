@@ -50,6 +50,9 @@ let lastPromptTime = 0;
 let lastPromptText = '';
 let lastResponseText = '';
 let livePreviewElement = null;
+let processingPrompt = false;
+let promptDebounceTimeout = null;
+const DEBOUNCE_DELAY = 1000; // 1 second debounce
 
 // Update the message listener to properly respond to pings
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -361,7 +364,7 @@ function detectChatGPT() {
   // Listen for form submissions
   document.addEventListener('submit', function(e) {
     debugLog("Form submitted in ChatGPT");
-    setTimeout(() => capturePrompt('gpt-4o'), 100);
+    capturePrompt('gpt-4o'); // No need for setTimeout, debouncing is built in
   }, true);
   
   // Listen for send button clicks
@@ -372,7 +375,7 @@ function detectChatGPT() {
     
     if (sendButton) {
       debugLog("ChatGPT send button clicked");
-      setTimeout(() => capturePrompt('gpt-4o'), 100);
+      capturePrompt('gpt-4o'); // No need for setTimeout, debouncing is built in
     }
   }, true);
   
@@ -426,18 +429,47 @@ function detectChatGPT() {
 
 // Helper function to capture the prompt from any textarea
 function capturePrompt(model) {
-  const textareas = document.querySelectorAll('textarea');
-  const inputFields = document.querySelectorAll('[role="textbox"]');
+  // If already processing a prompt, don't start a new one
+  if (processingPrompt) {
+    debugLog("Already processing a prompt, skipping duplicate");
+    return;
+  }
   
-  debugLog(`Looking for input elements (found ${textareas.length} textareas, ${inputFields.length} textboxes)`);
+  // Clear any pending debounce timeout
+  if (promptDebounceTimeout) {
+    clearTimeout(promptDebounceTimeout);
+  }
+  
+  // Set a debounce timeout to prevent multiple rapid captures
+  promptDebounceTimeout = setTimeout(() => {
+    // Start actual prompt capture process
+    capturePromptImpl(model);
+    // Reset processing flag after a delay to allow for next prompt
+    setTimeout(() => {
+      processingPrompt = false;
+    }, 2000); // 2 seconds cooldown between prompts
+  }, DEBOUNCE_DELAY);
+}
+
+// Move the existing capturePrompt logic to this implementation function
+function capturePromptImpl(model) {
+  processingPrompt = true;
+  
+  const textareas = document.querySelectorAll('textarea');
+  const inputFields = document.querySelectorAll('[role="textbox"], [contenteditable="true"]');
+  const inputs = document.querySelectorAll('input[type="text"]');
+  
+  debugLog(`Looking for input elements (found ${textareas.length} textareas, ${inputFields.length} textboxes, ${inputs.length} text inputs)`);
   
   let promptText = '';
+  let sourceElement = null;
   
   // Try textareas first
   if (textareas.length > 0) {
     for (const textarea of textareas) {
       if (textarea.value && textarea.value.trim().length > 0) {
         promptText = textarea.value;
+        sourceElement = textarea;
         debugLog(`Found prompt in textarea: ${promptText.substring(0, 30)}...`);
         break;
       }
@@ -449,23 +481,71 @@ function capturePrompt(model) {
     for (const field of inputFields) {
       if (field.textContent && field.textContent.trim().length > 0) {
         promptText = field.textContent;
+        sourceElement = field;
         debugLog(`Found prompt in contentEditable: ${promptText.substring(0, 30)}...`);
         break;
       }
     }
   }
   
-  // If still no prompt, try making one for testing
+  // If still no prompt found, try text inputs
+  if (!promptText && inputs.length > 0) {
+    for (const input of inputs) {
+      if (input.value && input.value.trim().length > 0) {
+        promptText = input.value;
+        sourceElement = input;
+        debugLog(`Found prompt in input: ${promptText.substring(0, 30)}...`);
+        break;
+      }
+    }
+  }
+  
+  // If still no prompt found, try last recorded prompt
+  if (!promptText && lastPromptText && Date.now() - lastPromptTime < 5000) { // Only use recent prompts
+    promptText = lastPromptText;
+    debugLog(`Using last recorded prompt: ${promptText.substring(0, 30)}...`);
+  }
+  
+  // If still no prompt, check for fixed elements where prompts might be stored
+  if (!promptText) {
+    // Look for message containers that might contain the last sent message
+    const messageElements = document.querySelectorAll('.user-message, .human-message, .prompt-message');
+    if (messageElements.length > 0) {
+      const lastMessage = messageElements[messageElements.length - 1];
+      if (lastMessage && lastMessage.textContent) {
+        promptText = lastMessage.textContent;
+        debugLog(`Found prompt in message element: ${promptText.substring(0, 30)}...`);
+      }
+    }
+  }
+  
+  // If still no prompt, fallback to a test prompt in development
   if (!promptText && currentSite) {
     debugLog("No prompt found, creating test prompt");
-    promptText = "This is a test prompt to ensure the extension is working correctly.";
+    promptText = "Test prompt: please process this AI query as if it were typed by a user.";
   }
   
   if (promptText) {
-    debugLog(`Processing prompt (length: ${promptText.length})`);
-    processPrompt(promptText, model);
-    lastPromptText = promptText;
-    lastPromptTime = Date.now();
+    // Check if this is the same prompt text we processed recently (within 5 seconds)
+    const isDuplicate = promptText === lastPromptText && (Date.now() - lastPromptTime < 5000);
+    
+    if (!isDuplicate) {
+      debugLog(`Processing prompt (length: ${promptText.length})`);
+      processPrompt(promptText, model);
+      lastPromptText = promptText;
+      lastPromptTime = Date.now();
+    } else {
+      debugLog("Skipping duplicate prompt (same text processed recently)");
+    }
+    
+    // Clear the input if we found a source element
+    if (sourceElement && false) { // Disabled for now to prevent interfering with user experience
+      if (sourceElement.value !== undefined) {
+        sourceElement.value = '';
+      } else if (sourceElement.textContent !== undefined) {
+        sourceElement.textContent = '';
+      }
+    }
   } else {
     debugLog("No prompt text found");
   }
@@ -494,7 +574,7 @@ function detectClaude() {
     
     if (sendButton) {
       debugLog("Claude send button clicked");
-      setTimeout(() => capturePrompt('claude'), 100);
+      capturePrompt('claude'); // No need for setTimeout, debouncing is built in
     }
   }, true);
   
@@ -504,7 +584,7 @@ function detectClaude() {
       if (e.target.getAttribute('role') === 'textbox' || 
           e.target.getAttribute('contenteditable') === 'true') {
         debugLog("Claude Enter key pressed");
-        setTimeout(() => capturePrompt('claude'), 100);
+        capturePrompt('claude'); // No need for setTimeout, debouncing is built in
       }
     }
   }, true);
@@ -552,7 +632,7 @@ function detectPerplexity() {
     
     if (searchButton) {
       debugLog("Perplexity search button clicked");
-      setTimeout(() => capturePrompt('perplexity'), 100);
+      capturePrompt('perplexity'); // No need for setTimeout, debouncing is built in
     }
   }, true);
   
@@ -563,7 +643,7 @@ function detectPerplexity() {
           e.target.tagName === 'INPUT' || 
           e.target.getAttribute('role') === 'textbox') {
         debugLog("Perplexity Enter key pressed");
-        setTimeout(() => capturePrompt('perplexity'), 100);
+        capturePrompt('perplexity'); // No need for setTimeout, debouncing is built in
       }
     }
   }, true);
@@ -611,7 +691,7 @@ function detectGoogleAI() {
     
     if (sendButton) {
       debugLog("Google AI send button clicked");
-      setTimeout(() => capturePrompt('gemini'), 100);
+      capturePrompt('gemini'); // No need for setTimeout, debouncing is built in
     }
   }, true);
   
@@ -621,7 +701,7 @@ function detectGoogleAI() {
       if (e.target.tagName === 'TEXTAREA' || 
           e.target.getAttribute('contenteditable') === 'true') {
         debugLog("Google AI Enter key pressed");
-        setTimeout(() => capturePrompt('gemini'), 100);
+        capturePrompt('gemini'); // No need for setTimeout, debouncing is built in
       }
     }
   }, true);
@@ -745,6 +825,32 @@ function detectGenericAI() {
 
 // Helper function to capture the prompt from any textarea
 function capturePrompt(model) {
+  // If already processing a prompt, don't start a new one
+  if (processingPrompt) {
+    debugLog("Already processing a prompt, skipping duplicate");
+    return;
+  }
+  
+  // Clear any pending debounce timeout
+  if (promptDebounceTimeout) {
+    clearTimeout(promptDebounceTimeout);
+  }
+  
+  // Set a debounce timeout to prevent multiple rapid captures
+  promptDebounceTimeout = setTimeout(() => {
+    // Start actual prompt capture process
+    capturePromptImpl(model);
+    // Reset processing flag after a delay to allow for next prompt
+    setTimeout(() => {
+      processingPrompt = false;
+    }, 2000); // 2 seconds cooldown between prompts
+  }, DEBOUNCE_DELAY);
+}
+
+// Move the existing capturePrompt logic to this implementation function
+function capturePromptImpl(model) {
+  processingPrompt = true;
+  
   const textareas = document.querySelectorAll('textarea');
   const inputFields = document.querySelectorAll('[role="textbox"], [contenteditable="true"]');
   const inputs = document.querySelectorAll('input[type="text"]');
@@ -791,7 +897,7 @@ function capturePrompt(model) {
   }
   
   // If still no prompt found, try last recorded prompt
-  if (!promptText && lastPromptText) {
+  if (!promptText && lastPromptText && Date.now() - lastPromptTime < 5000) { // Only use recent prompts
     promptText = lastPromptText;
     debugLog(`Using last recorded prompt: ${promptText.substring(0, 30)}...`);
   }
@@ -816,10 +922,17 @@ function capturePrompt(model) {
   }
   
   if (promptText) {
-    debugLog(`Processing prompt (length: ${promptText.length})`);
-    processPrompt(promptText, model);
-    lastPromptText = promptText;
-    lastPromptTime = Date.now();
+    // Check if this is the same prompt text we processed recently (within 5 seconds)
+    const isDuplicate = promptText === lastPromptText && (Date.now() - lastPromptTime < 5000);
+    
+    if (!isDuplicate) {
+      debugLog(`Processing prompt (length: ${promptText.length})`);
+      processPrompt(promptText, model);
+      lastPromptText = promptText;
+      lastPromptTime = Date.now();
+    } else {
+      debugLog("Skipping duplicate prompt (same text processed recently)");
+    }
     
     // Clear the input if we found a source element
     if (sourceElement && false) { // Disabled for now to prevent interfering with user experience
