@@ -1,4 +1,3 @@
-
 // Content script for AI Waste Watcher - Monitors AI sites for prompts
 
 // Default impact estimates per prompt (these would ideally be based on research)
@@ -188,23 +187,15 @@ function updateLivePreview(stats: {
 function detectChatGPT() {
   // Watch for send button clicks
   document.addEventListener('click', (e) => {
-    if ((e.target as Element).closest('button[data-testid="send-button"]') || 
-       (e as KeyboardEvent).key === 'Enter' && !(e as KeyboardEvent).shiftKey && (e.target as Element).tagName === 'TEXTAREA') {
-      const textareas = document.querySelectorAll('textarea');
-      if (textareas.length > 0) {
-        const textarea = textareas[textareas.length - 1];
-        const promptText = textarea.value;
-        
-        // Only process if the prompt is new and not empty
-        if (promptText && promptText !== lastPromptText && Date.now() - lastPromptTime > 1000) {
-          processPrompt(promptText, 'gpt-4o'); // Assuming GPT-4o for ChatGPT
-          lastPromptText = promptText;
-          lastPromptTime = Date.now();
-          
-          // Start monitoring for response
-          monitorChatGPTResponse();
-        }
-      }
+    if ((e.target as Element).closest('button[data-testid="send-button"]')) {
+      handlePotentialPrompt('gpt-4o');
+    }
+  }, true);
+  
+  // Watch for Enter key presses in textareas
+  document.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey && (e.target as Element).tagName === 'TEXTAREA') {
+      handlePotentialPrompt('gpt-4o');
     }
   }, true);
 }
@@ -249,18 +240,15 @@ function monitorChatGPTResponse() {
 // Detect Claude prompts
 function detectClaude() {
   document.addEventListener('click', (e) => {
-    if ((e.target as Element).closest('button[aria-label="Send message"]') || 
-       (e as KeyboardEvent).key === 'Enter' && !(e as KeyboardEvent).shiftKey && (e.target as Element).getAttribute('role') === 'textbox') {
-      const textbox = document.querySelector('[role="textbox"]');
-      if (textbox) {
-        const promptText = textbox.textContent;
-        
-        if (promptText && promptText !== lastPromptText && Date.now() - lastPromptTime > 1000) {
-          processPrompt(promptText, 'claude');
-          lastPromptText = promptText;
-          lastPromptTime = Date.now();
-        }
-      }
+    if ((e.target as Element).closest('button[aria-label="Send message"]')) {
+      handlePotentialPrompt('claude');
+    }
+  }, true);
+  
+  // Watch for Enter key presses in textboxes
+  document.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey && (e.target as Element).getAttribute('role') === 'textbox') {
+      handlePotentialPrompt('claude');
     }
   }, true);
 }
@@ -268,50 +256,62 @@ function detectClaude() {
 // Detect Perplexity prompts
 function detectPerplexity() {
   document.addEventListener('click', (e) => {
-    if ((e.target as Element).closest('button[aria-label="Search"]') || 
-       (e as KeyboardEvent).key === 'Enter' && !(e as KeyboardEvent).shiftKey && (e.target as Element).tagName === 'TEXTAREA') {
-      const textareas = document.querySelectorAll('textarea');
-      if (textareas.length > 0) {
-        const textarea = textareas[0];
-        const promptText = textarea.value;
-        
-        if (promptText && promptText !== lastPromptText && Date.now() - lastPromptTime > 1000) {
-          processPrompt(promptText, 'perplexity');
-          lastPromptText = promptText;
-          lastPromptTime = Date.now();
-        }
-      }
+    if ((e.target as Element).closest('button[aria-label="Search"]')) {
+      handlePotentialPrompt('perplexity');
+    }
+  }, true);
+  
+  // Watch for Enter key presses in textareas
+  document.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey && (e.target as Element).tagName === 'TEXTAREA') {
+      handlePotentialPrompt('perplexity');
     }
   }, true);
 }
 
 // Generic AI site prompt detection (fallback)
 function detectGenericAI() {
+  // Watch for button clicks
   document.addEventListener('click', (e) => {
-    if ((e.target as Element).tagName === 'BUTTON' || 
-       (e as KeyboardEvent).key === 'Enter' && !(e as KeyboardEvent).shiftKey && 
-        ((e.target as Element).tagName === 'TEXTAREA' || (e.target as Element).tagName === 'INPUT')) {
-      
-      // Try to find text input
-      const inputs = [
-        ...document.querySelectorAll('textarea'), 
-        ...document.querySelectorAll('input[type="text"]'),
-        ...document.querySelectorAll('[role="textbox"]')
-      ];
-      
-      if (inputs.length > 0) {
-        // Get the most recently active input
-        const input = inputs[inputs.length - 1] as HTMLInputElement | HTMLTextAreaElement;
-        const promptText = input.value || input.textContent || '';
-        
-        if (promptText && promptText !== lastPromptText && Date.now() - lastPromptTime > 1000) {
-          processPrompt(promptText, 'default');
-          lastPromptText = promptText;
-          lastPromptTime = Date.now();
-        }
-      }
+    if ((e.target as Element).tagName === 'BUTTON') {
+      handlePotentialPrompt('default');
     }
   }, true);
+  
+  // Watch for Enter key presses in inputs and textareas
+  document.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey && 
+        ((e.target as Element).tagName === 'TEXTAREA' || (e.target as Element).tagName === 'INPUT')) {
+      handlePotentialPrompt('default');
+    }
+  }, true);
+}
+
+// Handle potential prompt submission
+function handlePotentialPrompt(model: string) {
+  // Try to find text input
+  const inputs = [
+    ...document.querySelectorAll('textarea'), 
+    ...document.querySelectorAll('input[type="text"]'),
+    ...document.querySelectorAll('[role="textbox"]')
+  ];
+  
+  if (inputs.length > 0) {
+    // Get the most recently active input
+    const input = inputs[inputs.length - 1] as HTMLInputElement | HTMLTextAreaElement;
+    const promptText = input.value || input.textContent || '';
+    
+    if (promptText && promptText !== lastPromptText && Date.now() - lastPromptTime > 1000) {
+      processPrompt(promptText, model);
+      lastPromptText = promptText;
+      lastPromptTime = Date.now();
+      
+      // Start monitoring for response if it's ChatGPT
+      if (model === 'gpt-4o') {
+        monitorChatGPTResponse();
+      }
+    }
+  }
 }
 
 // Estimate token count from text
@@ -429,3 +429,6 @@ window.addEventListener('load', () => {
   // Check if we're on an AI site by messaging the background script
   chrome.runtime.sendMessage({action: "checkCurrentSite"});
 });
+
+// Export to satisfy TypeScript module requirements
+export {};

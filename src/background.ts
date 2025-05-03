@@ -30,7 +30,7 @@ type TotalStats = {
 };
 
 // Listen for changes to tabs
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo: {status?: string}, tab) => {
   if (changeInfo.status === 'complete' && tab.url) {
     // Check if the tab is an AI site
     const url = new URL(tab.url);
