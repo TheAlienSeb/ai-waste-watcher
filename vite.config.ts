@@ -11,7 +11,7 @@ export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
     mode === "development" && componentTagger(),
-    crx({ manifest })
+    crx({ manifest: manifest })
   ].filter(Boolean),
 
   resolve: {
