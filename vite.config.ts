@@ -1,16 +1,19 @@
+
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
 import path from "path";
-import { crx } from "@crxjs/vite-plugin";   // <- NEW
-import manifest from "public/manifest.json";     // <- NEW
+import { crx, ManifestV3Export } from "@crxjs/vite-plugin";
+import rawManifest from "./public/manifest.json";
 import { componentTagger } from "lovable-tagger";
 
+// cast away the widened types
+const manifest = rawManifest as unknown as ManifestV3Export;
 
 export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
     mode === "development" && componentTagger(),
-    crx({ manifest })                         // <- NEW
+    crx({ manifest })
   ].filter(Boolean),
 
   resolve: {
@@ -18,19 +21,9 @@ export default defineConfig(({ mode }) => ({
   },
 
   build: {
-    outDir: "dist",                           // where Chrome will load from
-    emptyOutDir: true,
-    rollupOptions: {
-      input: {
-        background: "public/background.ts",
-        content: "public/content.ts"
-      },
-      output: {
-        // keep stable names (no hashes) so manifest matches
-        entryFileNames: "[name].js",
-        assetFileNames: "[name][extname]"
-      }
-    }
+    outDir: "dist",
+    emptyOutDir: true
+    // we let the plugin infer inputs from your manifest
   },
 
   server: {
