@@ -1,7 +1,7 @@
 
-import { defineManifest } from "@crxjs/vite-plugin";
+import { ManifestV3Export } from "@crxjs/vite-plugin";
 
-export default defineManifest({
+export default {
   manifest_version: 3,
   name: "AI Waste Watcher",
   version: "1.0.0",
@@ -13,7 +13,7 @@ export default defineManifest({
 
   background: {
     service_worker: "src/background.ts",
-    type: "module"
+    type: "module" as const
   },
 
   content_scripts: [
@@ -37,4 +37,4 @@ export default defineManifest({
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   }
-});
+} as ManifestV3Export;

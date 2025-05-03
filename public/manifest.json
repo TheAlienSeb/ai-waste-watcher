@@ -5,9 +5,14 @@
   "version": "1.0.0",
   "description": "Track the environmental impact of your AI interactions",
 
-  "action": { "default_popup": "popup.html" },
+  "action": {
+    "default_popup": "popup.html"
+  },
 
-  "background": { "service_worker": "background.js", "type": "module" },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
 
   "content_scripts": [
     {

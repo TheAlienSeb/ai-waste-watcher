@@ -20,7 +20,6 @@ export default defineConfig(({ mode }) => ({
   build: {
     outDir: "dist",
     emptyOutDir: true
-    // Let the plugin infer inputs from your manifest
   },
 
   server: {
