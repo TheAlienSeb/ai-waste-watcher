@@ -4,16 +4,23 @@
   "name": "AI Waste Watcher",
   "version": "1.0.0",
   "description": "Track the environmental impact of your AI interactions",
-
   "action": {
-    "default_popup": "popup.html"
+    "default_popup": "index.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
-
+  "permissions": [
+    "storage",
+    "tabs",
+    "webNavigation"
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
-
   "content_scripts": [
     {
       "matches": [
@@ -27,9 +34,6 @@
       "js": ["content.js"]
     }
   ],
-
-  "permissions": ["storage", "tabs", "webNavigation"],
-
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
