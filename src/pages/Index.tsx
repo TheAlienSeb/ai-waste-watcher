@@ -206,13 +206,6 @@ const Index = () => {
           <ImpactCharts prompts={prompts} />
         </TabsContent>
       </Tabs>
-      
-      <div className="text-xs text-center text-muted-foreground mt-6">
-        <p>Data is based on estimated model calculations.</p>
-        <p className="text-[10px] mt-1">
-          Created with ❤️ for a more sustainable AI future
-        </p>
-      </div>
     </div>
   );
 };

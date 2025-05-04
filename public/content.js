@@ -1,1104 +1,310 @@
 // Content script for AI Waste Watcher - Monitors AI sites for prompts
 
-// Default impact estimates per prompt (these would ideally be based on research)
+// ======= Configuration Constants =======
+
 const IMPACT_FACTORS = {
-  // Water usage in ml per token
-  waterPerToken: 0.5,
-  // Carbon in grams of CO2 per token
-  carbonPerToken: 0.2,
-  // Energy in joules per token (updated based on research)
-  energyPerToken: 0.3,
-  // Cost in cents per token
-  costPerToken: 0.0001
+  waterPerToken: 0.5,    // Water usage in ml per token
+  carbonPerToken: 0.2,   // Carbon in grams of CO2 per token
+  energyPerToken: 0.3,   // Energy in joules per token
+  costPerToken: 0.0001   // Cost in cents per token
 };
 
-// Different models have different impacts
-const MODEL_FACTORS = {
-  'gpt-4o': 3.5,
-  'gpt-4': 3.0,
-  'gpt-3.5': 1.0,
-  'claude': 2.0,
-  'perplexity': 1.5,
-  'gemini': 2.0,
-  'default': 1.0
+// Model-specific configuration
+const AI_MODELS = {
+  'gpt-4o': { factor: 3.5, parameters: 100, verbosity: 1.2 },
+  'gpt-4': { factor: 3.0, parameters: 80, verbosity: 1.2 },
+  'gpt-3.5': { factor: 1.0, parameters: 20, verbosity: 1.0 },
+  'claude': { factor: 2.0, parameters: 70, verbosity: 1.3 },
+  'perplexity': { factor: 1.5, parameters: 40, verbosity: 1.0 },
+  'gemini': { factor: 2.0, parameters: 60, verbosity: 1.0 },
+  'default': { factor: 1.0, parameters: 50, verbosity: 1.0 }
 };
 
-// Model parameter estimates (in billions)
-const MODEL_PARAMETERS = {
-  'gpt-4o': 100, // ~100B active parameters
-  'gpt-4': 80,
-  'gpt-3.5': 20,
-  'claude': 70,
-  'perplexity': 40,
-  'gemini': 60,
-  'default': 50
+// AI site detection configuration
+const AI_SITES = [
+  { domain: ["chat.openai.com", "chatgpt.com"], model: 'gpt-4o', detector: 'detectChatGPT' },
+  { domain: ["claude.ai", "anthropic.com"], model: 'claude', detector: 'detectClaude' },
+  { domain: ["perplexity.ai"], model: 'perplexity', detector: 'detectPerplexity' },
+  { domain: ["bard.google.com", "gemini.google.com"], model: 'gemini', detector: 'detectGoogleAI' },
+  { domain: ["huggingface.co"], model: 'default', detector: 'detectHuggingFace' }
+];
+
+// Common DOM selectors
+const SELECTORS = {
+  inputs: 'textarea, input[type="text"], [contenteditable="true"], [role="textbox"]',
+  buttons: {
+    chatgpt: 'button[data-testid="send-button"], button[aria-label="Send message"], button svg[data-icon="paper-airplane"]',
+    claude: 'button.claude-submit, button[aria-label="Send message"]',
+    perplexity: '.send-button, button[aria-label="Send"]',
+    gemini: 'button.send-button, button.send-message-button',
+    huggingface: 'button.svelte-1ugu6u7, button[aria-label="Send"]',
+    generic: 'button[type="submit"], button.send, button.submit'
+  },
+  responses: [
+    '.markdown-content', '.message-content', '.assistant', 
+    '[data-message-author-role="assistant"]', '.ai-response', '.response-content', 
+    '.answer-content', '.bot-message', '.claude-message', '.model-response'
+  ],
+  userMessages: '.user-message, .human-message, .prompt-message, .query'
 };
 
-// Cumulative stats across prompts
-const totalStats = {
-  cost: 0,
-  energyConsumption: 0,
-  waterUsage: 0,
-  carbonEmissions: 0,
-  promptCount: 0
+// ======= State Management =======
+const state = {
+  currentSite: '',
+  observingTextarea: false,
+  lastPromptTime: 0,
+  lastPromptText: '',
+  lastResponseText: '',
+  livePreviewElement: null,
+  processingPrompt: false,
+  promptDebounceTimeout: null,
+  attachedElements: new WeakSet(),
+  lastCapturedText: '',
+  lastCaptureTime: 0,
+  hooks: {
+    installed: false
+  },
+  totalStats: {
+    cost: 0,
+    energyConsumption: 0,
+    waterUsage: 0,
+    carbonEmissions: 0,
+    promptCount: 0
+  },
+  processedResponses: {},
+  lastProcessedResponseCleanup: 0
 };
 
-// Variables to track state
-let currentSite = '';
-let observingTextarea = false;
-let lastPromptTime = 0;
-let lastPromptText = '';
-let lastResponseText = '';
-let livePreviewElement = null;
-let processingPrompt = false;
-let promptDebounceTimeout = null;
 const DEBOUNCE_DELAY = 1000; // 1 second debounce
 
-// Update the message listener to properly respond to pings
+// ======= Message Handling =======
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === "ping") {
-    debugLog("Ping received, responding with pong");
-    sendResponse({status: "pong"});
-  } else if (message.action === "aiSiteDetected") {
-    debugLog(`AI site detected: ${message.site}`);
-    currentSite = message.site;
+  const handlers = {
+    ping: () => {
+      debugLog("Ping received, responding with pong");
+      sendResponse({status: "pong"});
+    },
     
-    // Set up different detection methods based on the specific AI site
-    if (currentSite.includes("chat.openai.com") || currentSite.includes("chatgpt.com")) {
-      detectChatGPT();
-    } else if (currentSite.includes("claude.ai") || currentSite.includes("anthropic.com")) {
-      detectClaude();
-    } else if (currentSite.includes("perplexity.ai")) {
-      detectPerplexity();
-    } else if (currentSite.includes("bard.google.com") || currentSite.includes("gemini.google.com")) {
-      detectGoogleAI();
-    } else {
-      // Generic detection for other AI sites
-      detectGenericAI();
+    aiSiteDetected: () => {
+      debugLog(`AI site detected: ${message.site}`);
+      state.currentSite = message.site;
+      
+      // Dynamically call the appropriate detector
+      const site = findSiteConfig(message.site);
+      if (site && detectors[site.detector]) {
+        detectors[site.detector]();
+      } else {
+        detectors.detectGenericAI();
+      }
+      
+      injectLivePreview();
+      sendResponse({status: `Detection configured for: ${message.site}`});
+    },
+    
+    showPopup: () => {
+      debugLog("Extension icon clicked - showing popup");
+      showLivePreview();
+      sendResponse({status: "Popup displayed"});
+    },
+    
+    resetStats: () => {
+      debugLog("Resetting statistics");
+      resetStats();
+      sendResponse({status: "Statistics reset"});
     }
-    
-    // Always inject the preview
-    injectLivePreview();
-    
-    sendResponse({status: "Detection configured for: " + message.site});
-  } else if (message.action === "showPopup") {
-    // Extension icon was clicked
-    debugLog("Extension icon clicked - showing popup");
-    showLivePreview();
-    sendResponse({status: "Popup displayed"});
-  } else if (message.action === "resetStats") {
-    // Reset request received
-    debugLog("Resetting statistics");
-    resetStats();
-    sendResponse({status: "Statistics reset"});
+  };
+  
+  if (handlers[message.action]) {
+    handlers[message.action]();
   }
+  
   return true; // Keep the message channel open for async responses
 });
+
+// ======= Core Functions =======
+
+// Define a detector registry object to store all detector functions
+const detectors = {
+  detectChatGPT: null,
+  detectClaude: null,
+  detectPerplexity: null,
+  detectGoogleAI: null, 
+  detectHuggingFace: null,
+  detectGenericAI: null
+};
+
+function findSiteConfig(url) {
+  return AI_SITES.find(site => 
+    site.domain.some(domain => url.includes(domain))
+  );
+}
 
 // Set up prompt detection based on the current site
 function setupPromptDetection() {
   debugLog("Setting up prompt detection");
   
-  if (observingTextarea) return;
+  if (state.observingTextarea) return;
   
-  // Configure site-specific detection
-  if (window.location.hostname.includes("chat.openai.com") || 
-      window.location.hostname.includes("chatgpt.com")) {
-    detectChatGPT();
-  } else if (window.location.hostname.includes("claude.ai") || 
-            window.location.hostname.includes("anthropic.com")) {
-    detectClaude();
-  } else if (window.location.hostname.includes("perplexity.ai")) {
-    detectPerplexity();
-  } else if (window.location.hostname.includes("bard.google.com") || 
-            window.location.hostname.includes("gemini.google.com")) {
-    detectGoogleAI();
+  const hostname = window.location.hostname;
+  const site = AI_SITES.find(site => 
+    site.domain.some(domain => hostname.includes(domain))
+  );
+  
+  if (site && detectors[site.detector]) {
+    detectors[site.detector]();
   } else {
-    detectGenericAI();
+    detectors.detectGenericAI();
   }
   
-  observingTextarea = true;
-  
-  // Also set up MutationObserver to detect new elements
+  state.observingTextarea = true;
   observePageChanges();
 }
 
-// Inject live preview element for real-time stats
-function injectLivePreview() {
-  if (livePreviewElement) {
-    // If it exists but is hidden, show it
-    if (livePreviewElement.style.display === 'none') {
-      livePreviewElement.style.display = 'block';
-    }
+// Unified function to enable proper prompt capture across all platforms
+function setupPromptHooks(model) {
+  debugLog(`Setting up comprehensive prompt hooks for model: ${model}`);
+  
+  if (state.hooks.installed) return;
+  state.hooks.installed = true;
+  
+  // 1. Attach to existing input elements
+  document.querySelectorAll(SELECTORS.inputs)
+    .forEach(el => attachPromptListener(el, model));
+  
+  // 2. Watch for dynamically added input elements
+  observeForNewInputs(model);
+  
+  // 3. Start polling as a fallback
+  startInputPolling(model);
+  
+  debugLog("Comprehensive prompt hooks installed successfully");
+  
+  // Store the last value of inputs before they're cleared (one-time setup)
+  if (!window._inputListenerInstalled) {
+    window._inputListenerInstalled = true;
+    document.addEventListener('input', storeLastValue, true);
+  }
+}
+
+// ======= Event Listeners & Observers =======
+
+function storeLastValue(e) {
+  if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') {
+    e.target._lastValue = e.target.value;
+  } else if (e.target.getAttribute('contenteditable') === 'true') {
+    e.target._lastValue = e.target.textContent;
+  }
+}
+
+function attachPromptListener(el, model) {
+  if (state.attachedElements.has(el)) return;
+  state.attachedElements.add(el);
+  
+  debugLog(`Attaching prompt listeners to element: ${el.tagName}${el.id ? '#' + el.id : ''}`);
+  
+  const handleInput = () => captureFromElement(el, model);
+  
+  el.addEventListener('input', handleInput, true);
+  el.addEventListener('beforeinput', handleInput, true);
+  el.addEventListener('change', handleInput, true);
+  
+  captureFromElement(el, model);
+}
+
+function captureFromElement(el, model) {
+  if (state.processingPrompt) return;
+  
+  const text = el.value !== undefined ? el.value : el.textContent;
+  if (!text || !text.trim()) return;
+  
+  const trimmedText = text.trim();
+  const now = Date.now();
+  
+  if (trimmedText === state.lastCapturedText && now - state.lastCaptureTime < 5000) {
     return;
   }
   
-  livePreviewElement = document.createElement('div');
-  livePreviewElement.className = 'ai-waste-watcher-preview';
-  livePreviewElement.style.cssText = `
-    position: fixed;
-    background: rgba(33, 33, 33, 0.95);
-    color: white;
-    border: 1px solid #444;
-    border-radius: 8px;
-    padding: 12px;
-    font-size: 12px;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
-    z-index: 10000;
-    max-width: 300px;
-    backdrop-filter: blur(5px);
-  `;
+  debugLog(`Captured text from element: ${trimmedText.substring(0, 30)}...`);
+  state.lastCapturedText = trimmedText;
+  state.lastCaptureTime = now;
   
-  livePreviewElement.innerHTML = `
-    <div style="margin-bottom: 8px; font-weight: bold; display: flex; align-items: center; border-bottom: 1px solid #444; padding-bottom: 8px;">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-right: 6px;">
-        <path d="M13 16.9V17.9C13 18.4 13.4 18.9 13.9 18.9H16.9C17.4 18.9 17.9 18.5 17.9 17.9V16.9C17.9 16.4 17.5 15.9 16.9 15.9H14.9C14.4 15.9 13.9 16.4 13.9 16.9H13Z" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M16.9 9H14C13.4 9 13 9.4 13 10V14.9H13.9H16.9C17.5 14.9 17.9 14.5 17.9 13.9V10C18 9.4 17.5 9 16.9 9Z" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M16.9 8.9V7.9C16.9 7.4 16.5 6.9 15.9 6.9H13.9C13.4 6.9 12.9 7.3 12.9 7.9V12.9H13.9H15.9C16.4 12.9 16.9 12.5 16.9 11.9V8.9Z" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M13 5V7.9C13 8.5 12.6 8.9 12 8.9H8C7.4 8.9 7 8.5 7 7.9V5C7 4.4 7.4 4 8 4H12C12.6 4 13 4.4 13 5Z" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M7 9V11.9C7 12.5 7.4 12.9 8 12.9H12C12.6 12.9 13 12.5 13 11.9V9H8C7.4 9 7 9.4 7 9Z" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M7.1 13H6.1C5.5 13 5.1 13.4 5.1 14V16C5.1 16.6 5.5 17 6.1 17H10.1C10.7 17 11.1 16.6 11.1 16V14C11.1 13.4 10.7 13 10.1 13H8.1" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M5 19.2V5C5 4.4 4.6 4 4 4C3.4 4 3 4.4 3 5V19.2C3 19.7 3.3 20 3.7 20H20.2C20.6 20 21 19.7 21 19.2C21 18.8 20.7 18.4 20.2 18.4H5" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-      AI Waste Watcher
-      <span style="margin-left: auto; cursor: pointer; color: #aaa;" id="ai-waste-close">×</span>
-    </div>
-    <div id="ai-waste-stats" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 11px;">
-      <div>
-        <div style="font-weight: bold; color: #d8b4fe;">Total Cost:</div>
-        <div>$0.00</div>
-      </div>
-      <div>
-        <div style="font-weight: bold; color: #fcd34d;">Total Energy:</div>
-        <div>0.00 Wh</div>
-      </div>
-      <div>
-        <div style="font-weight: bold; color: #93c5fd;">Total Water:</div>
-        <div>0 mL</div>
-      </div>
-      <div>
-        <div style="font-weight: bold; color: #86efac;">Total Carbon:</div>
-        <div>0 g</div>
-      </div>
-    </div>
-    <div id="ai-waste-debug" style="margin-top: 8px; font-size: 10px; color: #aaa; display: none;">
-      Status: Waiting for input...
-    </div>
-  `;
+  capturePrompt(model);
+}
+
+function observeForNewInputs(model) {
+  debugLog(`Setting up DOM observer for new input elements (model: ${model})`);
   
-  // Add a test button
-  const testButton = document.createElement('div');
-  testButton.style.cssText = `
-    margin-top: 8px;
-    padding: 6px 0;
-    text-align: center;
-    background: #444;
-    border-radius: 4px;
-    font-size: 11px;
-    cursor: pointer;
-  `;
-  testButton.textContent = "Test Impact Calculation";
-  testButton.onclick = () => {
-    debugLog("Manual test triggered");
-    processPrompt("This is a test prompt to verify impact calculations are working correctly.", "gpt-4o");
-  };
-  
-  livePreviewElement.appendChild(testButton);
-  
-  document.body.appendChild(livePreviewElement);
-  
-  // Add close button functionality
-  document.getElementById('ai-waste-close').addEventListener('click', () => {
-    livePreviewElement.style.display = 'none';
-    // Store state in session storage
-    sessionStorage.setItem('aiWasteWatcherHidden', 'true');
-  });
-  
-  // Make it draggable
-  livePreviewElement.style.cursor = 'move';
-  livePreviewElement.style.left = '20px';
-  livePreviewElement.style.top = '20px';
-  
-  let isDragging = false;
-  let offsetX = 0, offsetY = 0;
-  
-  // Handle mousedown to start dragging
-  livePreviewElement.addEventListener('mousedown', e => {
-    // Only handle dragging when clicking on the header area
-    const target = e.target;
-    const isHeader = target.closest('div') === livePreviewElement.firstElementChild;
-    
-    if (!isHeader) return;
-    
-    isDragging = true;
-    // Calculate where inside the box we clicked
-    offsetX = e.clientX - livePreviewElement.offsetLeft;
-    offsetY = e.clientY - livePreviewElement.offsetTop;
-    e.preventDefault();
-  });
-  
-  // Handle mousemove to perform dragging
-  document.addEventListener('mousemove', e => {
-    if (!isDragging) return;
-    
-    // Calculate new position ensuring it stays within viewport
-    let newLeft = e.clientX - offsetX;
-    let newTop = e.clientY - offsetY;
-    
-    // Keep within viewport boundaries
-    const maxX = window.innerWidth - livePreviewElement.offsetWidth;
-    const maxY = window.innerHeight - livePreviewElement.offsetHeight;
-    
-    newLeft = Math.max(0, Math.min(maxX, newLeft));
-    newTop = Math.max(0, Math.min(maxY, newTop));
-    
-    livePreviewElement.style.left = `${newLeft}px`;
-    livePreviewElement.style.top = `${newTop}px`;
-  });
-  
-  // Handle mouseup to stop dragging
-  document.addEventListener('mouseup', () => {
-    if (isDragging) {
-      isDragging = false;
+  const observer = new MutationObserver(mutations => {
+    for (const mutation of mutations) {
+      if (mutation.type !== 'childList') continue;
       
-      // Save position in session storage
-      sessionStorage.setItem('aiWasteWatcherPositionX', livePreviewElement.style.left);
-      sessionStorage.setItem('aiWasteWatcherPositionY', livePreviewElement.style.top);
-    }
-  });
-  
-  // Restore previous position if available
-  const savedX = sessionStorage.getItem('aiWasteWatcherPositionX');
-  const savedY = sessionStorage.getItem('aiWasteWatcherPositionY');
-  
-  if (savedX && savedY) {
-    livePreviewElement.style.left = savedX;
-    livePreviewElement.style.top = savedY;
-  }
-}
-
-// Add a function to restore the popup when extension is clicked
-function showLivePreview() {
-  if (livePreviewElement) {
-    livePreviewElement.style.display = 'block';
-    sessionStorage.removeItem('aiWasteWatcherHidden');
-  } else {
-    injectLivePreview();
-  }
-}
-
-// Add a function to reset statistics
-function resetStats() {
-  // Reset the cumulative stats object
-  totalStats.cost = 0;
-  totalStats.energyConsumption = 0;
-  totalStats.waterUsage = 0;
-  totalStats.carbonEmissions = 0;
-  totalStats.promptCount = 0;
-  
-  // Update the UI
-  const statsContainer = document.getElementById('ai-waste-stats');
-  if (statsContainer) {
-    statsContainer.innerHTML = `
-      <div>
-        <div style="font-weight: bold; color: #d8b4fe;">Total Cost:</div>
-        <div>$0.00</div>
-      </div>
-      <div>
-        <div style="font-weight: bold; color: #fcd34d;">Total Energy:</div>
-        <div>0.00 Wh</div>
-      </div>
-      <div>
-        <div style="font-weight: bold; color: #93c5fd;">Total Water:</div>
-        <div>0 mL</div>
-      </div>
-      <div>
-        <div style="font-weight: bold; color: #86efac;">Total Carbon:</div>
-        <div>0 g</div>
-      </div>
-      <div style="grid-column: span 2; margin-top: 4px; font-size: 10px; text-align: center; color: #aaa;">
-        Prompts analyzed: 0
-      </div>
-    `;
-  }
-}
-
-// Update the live preview with stats
-function updateLivePreview(stats) {
-  if (!livePreviewElement) return;
-  
-  const statsContainer = document.getElementById('ai-waste-stats');
-  if (!statsContainer) return;
-  
-  // Calculate watt-hours
-  const energyInWattHours = stats.energyConsumption / 3600000;
-  
-  statsContainer.innerHTML = `
-    <div>
-      <div style="font-weight: bold; color: #9333ea;">Total Cost:</div>
-      <div>$${stats.cost.toFixed(4)}</div>
-    </div>
-    <div>
-      <div style="font-weight: bold; color: #ca8a04;">Total Energy:</div>
-      <div>${energyInWattHours.toFixed(3)} Wh</div>
-    </div>
-    <div>
-      <div style="font-weight: bold; color: #3b82f6;">Total Water:</div>
-      <div>${stats.waterUsage.toFixed(1)} mL</div>
-    </div>
-    <div>
-      <div style="font-weight: bold; color: #22c55e;">Total Carbon:</div>
-      <div>${stats.carbonEmissions.toFixed(2)} g</div>
-    </div>
-    <div style="grid-column: span 2; margin-top: 4px; font-size: 10px; text-align: center; color: #aaa;">
-      Prompts analyzed: ${stats.promptCount}
-    </div>
-  `;
-}
-
-// Improve the ChatGPT detection
-function detectChatGPT() {
-  debugLog("Setting up ChatGPT detection");
-  
-  // Listen for form submissions
-  document.addEventListener('submit', function(e) {
-    debugLog("Form submitted in ChatGPT");
-    capturePrompt('gpt-4o'); // No need for setTimeout, debouncing is built in
-  }, true);
-  
-  // Listen for send button clicks
-  document.addEventListener('click', function(e) {
-    const sendButton = e.target.closest('button[data-testid="send-button"]') || 
-                     e.target.closest('button[aria-label="Send message"]') ||
-                     e.target.closest('button svg[data-icon="paper-airplane"]');
-    
-    if (sendButton) {
-      debugLog("ChatGPT send button clicked");
-      capturePrompt('gpt-4o'); // No need for setTimeout, debouncing is built in
-    }
-  }, true);
-  
-  // Also listen for Enter key in textareas
-  document.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      if (e.target.tagName === 'TEXTAREA' || 
-          e.target.getAttribute('role') === 'textbox' ||
-          e.target.classList.contains('chatgpt-textarea')) {
-        debugLog("ChatGPT Enter key pressed");
-        setTimeout(() => capturePrompt('gpt-4o'), 100);
-      }
-    }
-  }, true);
-  
-  // Add a mutation observer specifically for ChatGPT's dynamic interface
-  const chatObserver = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      if (mutation.type === 'childList' && 
-          mutation.addedNodes.length && 
-          document.querySelector('[data-list-id="chat-messages"]')) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
         
-        // Check if this looks like a new message being added
-        const messageAdded = Array.from(mutation.addedNodes).some(node => 
-          node.nodeType === Node.ELEMENT_NODE && 
-          (node.classList?.contains('group') || 
-           node.querySelector?.('.markdown'))
-        );
+        if (node.matches && node.matches(SELECTORS.inputs)) {
+          attachPromptListener(node, model);
+        }
         
-        if (messageAdded) {
-          debugLog("ChatGPT message added to DOM");
-          capturePrompt('gpt-4o');
+        if (node.querySelectorAll) {
+          const inputElements = node.querySelectorAll(SELECTORS.inputs);
+          inputElements.forEach(el => attachPromptListener(el, model));
         }
       }
     }
   });
   
-  // Start observing the chat container
-  setTimeout(() => {
-    const chatContainer = document.querySelector('[data-list-id="chat-messages"]') || 
-                         document.querySelector('#__next main');
-    if (chatContainer) {
-      chatObserver.observe(chatContainer, { 
-        childList: true, 
-        subtree: true 
-      });
-      debugLog("ChatGPT message observer attached");
-    }
-  }, 2000);
-}
-
-// Helper function to capture the prompt from any textarea
-function capturePrompt(model) {
-  // If already processing a prompt, don't start a new one
-  if (processingPrompt) {
-    debugLog("Already processing a prompt, skipping duplicate");
-    return;
-  }
-  
-  // Clear any pending debounce timeout
-  if (promptDebounceTimeout) {
-    clearTimeout(promptDebounceTimeout);
-  }
-  
-  // Set a debounce timeout to prevent multiple rapid captures
-  promptDebounceTimeout = setTimeout(() => {
-    // Start actual prompt capture process
-    capturePromptImpl(model);
-    // Reset processing flag after a delay to allow for next prompt
-    setTimeout(() => {
-      processingPrompt = false;
-    }, 2000); // 2 seconds cooldown between prompts
-  }, DEBOUNCE_DELAY);
-}
-
-// Move the existing capturePrompt logic to this implementation function
-function capturePromptImpl(model) {
-  processingPrompt = true;
-  
-  const textareas = document.querySelectorAll('textarea');
-  const inputFields = document.querySelectorAll('[role="textbox"], [contenteditable="true"]');
-  const inputs = document.querySelectorAll('input[type="text"]');
-  
-  debugLog(`Looking for input elements (found ${textareas.length} textareas, ${inputFields.length} textboxes, ${inputs.length} text inputs)`);
-  
-  let promptText = '';
-  let sourceElement = null;
-  
-  // Try textareas first
-  if (textareas.length > 0) {
-    for (const textarea of textareas) {
-      if (textarea.value && textarea.value.trim().length > 0) {
-        promptText = textarea.value;
-        sourceElement = textarea;
-        debugLog(`Found prompt in textarea: ${promptText.substring(0, 30)}...`);
-        break;
-      }
-    }
-  }
-  
-  // If no prompt found, try contentEditable fields
-  if (!promptText && inputFields.length > 0) {
-    for (const field of inputFields) {
-      if (field.textContent && field.textContent.trim().length > 0) {
-        promptText = field.textContent;
-        sourceElement = field;
-        debugLog(`Found prompt in contentEditable: ${promptText.substring(0, 30)}...`);
-        break;
-      }
-    }
-  }
-  
-  // If still no prompt found, try text inputs
-  if (!promptText && inputs.length > 0) {
-    for (const input of inputs) {
-      if (input.value && input.value.trim().length > 0) {
-        promptText = input.value;
-        sourceElement = input;
-        debugLog(`Found prompt in input: ${promptText.substring(0, 30)}...`);
-        break;
-      }
-    }
-  }
-  
-  // If still no prompt found, try last recorded prompt
-  if (!promptText && lastPromptText && Date.now() - lastPromptTime < 5000) { // Only use recent prompts
-    promptText = lastPromptText;
-    debugLog(`Using last recorded prompt: ${promptText.substring(0, 30)}...`);
-  }
-  
-  // If still no prompt, check for fixed elements where prompts might be stored
-  if (!promptText) {
-    // Look for message containers that might contain the last sent message
-    const messageElements = document.querySelectorAll('.user-message, .human-message, .prompt-message');
-    if (messageElements.length > 0) {
-      const lastMessage = messageElements[messageElements.length - 1];
-      if (lastMessage && lastMessage.textContent) {
-        promptText = lastMessage.textContent;
-        debugLog(`Found prompt in message element: ${promptText.substring(0, 30)}...`);
-      }
-    }
-  }
-  
-  // If still no prompt, fallback to a test prompt in development
-  if (!promptText && currentSite) {
-    debugLog("No prompt found, creating test prompt");
-    promptText = "Test prompt: please process this AI query as if it were typed by a user.";
-  }
-  
-  if (promptText) {
-    // Check if this is the same prompt text we processed recently (within 5 seconds)
-    const isDuplicate = promptText === lastPromptText && (Date.now() - lastPromptTime < 5000);
-    
-    if (!isDuplicate) {
-      debugLog(`Processing prompt (length: ${promptText.length})`);
-      processPrompt(promptText, model);
-      lastPromptText = promptText;
-      lastPromptTime = Date.now();
-    } else {
-      debugLog("Skipping duplicate prompt (same text processed recently)");
-    }
-    
-    // Clear the input if we found a source element
-    if (sourceElement && false) { // Disabled for now to prevent interfering with user experience
-      if (sourceElement.value !== undefined) {
-        sourceElement.value = '';
-      } else if (sourceElement.textContent !== undefined) {
-        sourceElement.textContent = '';
-      }
-    }
-  } else {
-    debugLog("No prompt text found");
-  }
-}
-
-// Add this new function to ensure message handling is working
-function checkConnectionWithBackground() {
-  console.log("Checking connection with background script...");
-  chrome.runtime.sendMessage({action: "ping"}, function(response) {
-    if (response && response.status === "pong") {
-      console.log("Connection with background script confirmed!");
-    } else {
-      console.log("Connection test completed, response:", response);
-    }
-  });
-}
-
-// Detect Claude prompts
-function detectClaude() {
-  debugLog("Setting up Claude detection");
-  
-  // Listen for clicks on send button
-  document.addEventListener('click', function(e) {
-    const sendButton = e.target.closest('button[aria-label="Send message"]') || 
-                      e.target.closest('button svg[data-icon="paper-airplane"]');
-    
-    if (sendButton) {
-      debugLog("Claude send button clicked");
-      capturePrompt('claude'); // No need for setTimeout, debouncing is built in
-    }
-  }, true);
-  
-  // Listen for Enter key in contenteditable divs
-  document.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      if (e.target.getAttribute('role') === 'textbox' || 
-          e.target.getAttribute('contenteditable') === 'true') {
-        debugLog("Claude Enter key pressed");
-        capturePrompt('claude'); // No need for setTimeout, debouncing is built in
-      }
-    }
-  }, true);
-  
-  // Watch for new messages in Claude's conversation
-  const claudeObserver = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      if (mutation.type === 'childList' && mutation.addedNodes.length) {
-        const messageAdded = Array.from(mutation.addedNodes).some(node => 
-          node.nodeType === Node.ELEMENT_NODE && 
-          (node.classList?.contains('claude-message') || 
-           node.querySelector?.('.message-content'))
-        );
-        
-        if (messageAdded) {
-          debugLog("Claude message added to DOM");
-          capturePrompt('claude');
-        }
-      }
-    }
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true
   });
   
-  // Start observing the conversation container
-  setTimeout(() => {
-    const conversationContainer = document.querySelector('.conversations-container') || 
-                                 document.querySelector('.chat-messages');
-    if (conversationContainer) {
-      claudeObserver.observe(conversationContainer, { 
-        childList: true, 
-        subtree: true 
-      });
-      debugLog("Claude message observer attached");
-    }
-  }, 2000);
+  return observer;
 }
 
-// Detect Perplexity prompts
-function detectPerplexity() {
-  debugLog("Setting up Perplexity detection");
+function startInputPolling(model) {
+  debugLog(`Starting input polling for model: ${model}`);
   
-  // Listen for clicks on search button
-  document.addEventListener('click', function(e) {
-    const searchButton = e.target.closest('button[aria-label="Search"]') || 
-                       e.target.closest('button.search-button');
+  const pollingInterval = setInterval(() => {
+    const elements = document.querySelectorAll(SELECTORS.inputs);
     
-    if (searchButton) {
-      debugLog("Perplexity search button clicked");
-      capturePrompt('perplexity'); // No need for setTimeout, debouncing is built in
-    }
-  }, true);
-  
-  // Listen for Enter key in search input
-  document.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      if (e.target.tagName === 'TEXTAREA' || 
-          e.target.tagName === 'INPUT' || 
-          e.target.getAttribute('role') === 'textbox') {
-        debugLog("Perplexity Enter key pressed");
-        capturePrompt('perplexity'); // No need for setTimeout, debouncing is built in
-      }
-    }
-  }, true);
-  
-  // Watch for search results
-  const perplexityObserver = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      if (mutation.type === 'childList' && mutation.addedNodes.length) {
-        const resultAdded = Array.from(mutation.addedNodes).some(node => 
-          node.nodeType === Node.ELEMENT_NODE && 
-          (node.classList?.contains('result') || 
-           node.querySelector?.('.answer-content'))
-        );
-        
-        if (resultAdded) {
-          debugLog("Perplexity answer added to DOM");
-          capturePrompt('perplexity');
-        }
-      }
-    }
-  });
-  
-  // Start observing results container
-  setTimeout(() => {
-    const resultsContainer = document.querySelector('.results-container') || 
-                            document.querySelector('.search-results');
-    if (resultsContainer) {
-      perplexityObserver.observe(resultsContainer, { 
-        childList: true, 
-        subtree: true 
-      });
-      debugLog("Perplexity results observer attached");
-    }
-  }, 2000);
-}
-
-// Add Google AI detection (Bard/Gemini)
-function detectGoogleAI() {
-  debugLog("Setting up Google AI detection");
-  
-  // Listen for send button clicks
-  document.addEventListener('click', function(e) {
-    const sendButton = e.target.closest('button[aria-label="Send"]') || 
-                     e.target.closest('button[aria-label="Submit"]');
-    
-    if (sendButton) {
-      debugLog("Google AI send button clicked");
-      capturePrompt('gemini'); // No need for setTimeout, debouncing is built in
-    }
-  }, true);
-  
-  // Listen for Enter key in prompts
-  document.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      if (e.target.tagName === 'TEXTAREA' || 
-          e.target.getAttribute('contenteditable') === 'true') {
-        debugLog("Google AI Enter key pressed");
-        capturePrompt('gemini'); // No need for setTimeout, debouncing is built in
-      }
-    }
-  }, true);
-  
-  // Watch for responses from Google AI
-  const googleAIObserver = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      if (mutation.type === 'childList' && mutation.addedNodes.length) {
-        const responseAdded = Array.from(mutation.addedNodes).some(node => 
-          node.nodeType === Node.ELEMENT_NODE && 
-          (node.classList?.contains('response-container') || 
-           node.querySelector?.('.response-content'))
-        );
-        
-        if (responseAdded) {
-          debugLog("Google AI response added to DOM");
-          capturePrompt('gemini');
-        }
-      }
-    }
-  });
-  
-  // Start observing the conversation area
-  setTimeout(() => {
-    const conversationArea = document.querySelector('.conversation-container') || 
-                           document.querySelector('main');
-    if (conversationArea) {
-      googleAIObserver.observe(conversationArea, { 
-        childList: true, 
-        subtree: true 
-      });
-      debugLog("Google AI response observer attached");
-    }
-  }, 2000);
-}
-
-// Generic AI site prompt detection (fallback)
-function detectGenericAI() {
-  debugLog("Setting up generic AI detection");
-  
-  // Listen for button clicks that might submit prompts
-  document.addEventListener('click', function(e) {
-    // Target common buttons that might be used to submit prompts
-    const genericButtons = e.target.closest('button');
-    if (genericButtons) {
-      const buttonText = genericButtons.textContent.toLowerCase();
-      if (buttonText.includes('send') || 
-          buttonText.includes('submit') || 
-          buttonText.includes('ask') || 
-          buttonText.includes('generate')) {
-          
-        debugLog("Generic AI submit button clicked");
-        setTimeout(() => capturePrompt('default'), 100);
-      }
-    }
-  }, true);
-  
-  // Listen for Enter key in any input field
-  document.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      if (e.target.tagName === 'TEXTAREA' || 
-          e.target.tagName === 'INPUT' || 
-          e.target.getAttribute('contenteditable') === 'true' ||
-          e.target.getAttribute('role') === 'textbox') {
-          
-        debugLog("Generic AI Enter key pressed in input field");
-        setTimeout(() => capturePrompt('default'), 100);
-      }
-    }
-  }, true);
-  
-  // Set up a more generic mutation observer to detect changes
-  const genericObserver = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      if (mutation.type === 'childList' && mutation.addedNodes.length) {
-        // Look for patterns that might indicate a response
-        const possibleResponse = Array.from(mutation.addedNodes).some(node => 
-          node.nodeType === Node.ELEMENT_NODE && (
-            // Common chat UI patterns
-            node.classList?.contains('message') || 
-            node.classList?.contains('response') || 
-            node.classList?.contains('answer') ||
-            node.classList?.contains('ai-response') ||
-            // Look for markdown or code blocks (common in AI responses)
-            node.querySelector?.('pre code') ||
-            node.querySelector?.('.markdown') ||
-            // Check for newly added paragraphs that might be responses
-            node.tagName === 'P' && node.textContent.length > 50
-          )
-        );
-        
-        if (possibleResponse) {
-          debugLog("Possible AI response detected in DOM");
-          capturePrompt('default');
-        }
-      }
-    }
-  });
-  
-  // Start observing the main content area
-  setTimeout(() => {
-    // Try to find the main content area - prioritize chat containers
-    const mainContent = 
-      document.querySelector('.chat-container') || 
-      document.querySelector('.conversation') ||
-      document.querySelector('.messages') ||
-      document.querySelector('main') ||
-      document.querySelector('.main-content') ||
-      document.body; // Fall back to body if nothing else found
+    for (const el of elements) {
+      const text = el.value !== undefined ? el.value : el.textContent;
+      if (!text || !text.trim()) continue;
       
-    if (mainContent) {
-      genericObserver.observe(mainContent, { 
-        childList: true, 
-        subtree: true,
-        characterData: true
-      });
-      debugLog("Generic AI observer attached");
-    }
-  }, 2000);
-}
-
-// Helper function to capture the prompt from any textarea
-function capturePrompt(model) {
-  // If already processing a prompt, don't start a new one
-  if (processingPrompt) {
-    debugLog("Already processing a prompt, skipping duplicate");
-    return;
-  }
-  
-  // Clear any pending debounce timeout
-  if (promptDebounceTimeout) {
-    clearTimeout(promptDebounceTimeout);
-  }
-  
-  // Set a debounce timeout to prevent multiple rapid captures
-  promptDebounceTimeout = setTimeout(() => {
-    // Start actual prompt capture process
-    capturePromptImpl(model);
-    // Reset processing flag after a delay to allow for next prompt
-    setTimeout(() => {
-      processingPrompt = false;
-    }, 2000); // 2 seconds cooldown between prompts
-  }, DEBOUNCE_DELAY);
-}
-
-// Move the existing capturePrompt logic to this implementation function
-function capturePromptImpl(model) {
-  processingPrompt = true;
-  
-  const textareas = document.querySelectorAll('textarea');
-  const inputFields = document.querySelectorAll('[role="textbox"], [contenteditable="true"]');
-  const inputs = document.querySelectorAll('input[type="text"]');
-  
-  debugLog(`Looking for input elements (found ${textareas.length} textareas, ${inputFields.length} textboxes, ${inputs.length} text inputs)`);
-  
-  let promptText = '';
-  let sourceElement = null;
-  
-  // Try textareas first
-  if (textareas.length > 0) {
-    for (const textarea of textareas) {
-      if (textarea.value && textarea.value.trim().length > 0) {
-        promptText = textarea.value;
-        sourceElement = textarea;
-        debugLog(`Found prompt in textarea: ${promptText.substring(0, 30)}...`);
-        break;
+      if (text.trim() !== state.lastCapturedText) {
+        attachPromptListener(el, model);
       }
-    }
-  }
-  
-  // If no prompt found, try contentEditable fields
-  if (!promptText && inputFields.length > 0) {
-    for (const field of inputFields) {
-      if (field.textContent && field.textContent.trim().length > 0) {
-        promptText = field.textContent;
-        sourceElement = field;
-        debugLog(`Found prompt in contentEditable: ${promptText.substring(0, 30)}...`);
-        break;
-      }
-    }
-  }
-  
-  // If still no prompt found, try text inputs
-  if (!promptText && inputs.length > 0) {
-    for (const input of inputs) {
-      if (input.value && input.value.trim().length > 0) {
-        promptText = input.value;
-        sourceElement = input;
-        debugLog(`Found prompt in input: ${promptText.substring(0, 30)}...`);
-        break;
-      }
-    }
-  }
-  
-  // If still no prompt found, try last recorded prompt
-  if (!promptText && lastPromptText && Date.now() - lastPromptTime < 5000) { // Only use recent prompts
-    promptText = lastPromptText;
-    debugLog(`Using last recorded prompt: ${promptText.substring(0, 30)}...`);
-  }
-  
-  // If still no prompt, check for fixed elements where prompts might be stored
-  if (!promptText) {
-    // Look for message containers that might contain the last sent message
-    const messageElements = document.querySelectorAll('.user-message, .human-message, .prompt-message');
-    if (messageElements.length > 0) {
-      const lastMessage = messageElements[messageElements.length - 1];
-      if (lastMessage && lastMessage.textContent) {
-        promptText = lastMessage.textContent;
-        debugLog(`Found prompt in message element: ${promptText.substring(0, 30)}...`);
-      }
-    }
-  }
-  
-  // If still no prompt, fallback to a test prompt in development
-  if (!promptText && currentSite) {
-    debugLog("No prompt found, creating test prompt");
-    promptText = "Test prompt: please process this AI query as if it were typed by a user.";
-  }
-  
-  if (promptText) {
-    // Check if this is the same prompt text we processed recently (within 5 seconds)
-    const isDuplicate = promptText === lastPromptText && (Date.now() - lastPromptTime < 5000);
-    
-    if (!isDuplicate) {
-      debugLog(`Processing prompt (length: ${promptText.length})`);
-      processPrompt(promptText, model);
-      lastPromptText = promptText;
-      lastPromptTime = Date.now();
-    } else {
-      debugLog("Skipping duplicate prompt (same text processed recently)");
     }
     
-    // Clear the input if we found a source element
-    if (sourceElement && false) { // Disabled for now to prevent interfering with user experience
-      if (sourceElement.value !== undefined) {
-        sourceElement.value = '';
-      } else if (sourceElement.textContent !== undefined) {
-        sourceElement.textContent = '';
-      }
+    if (!state.lastCapturedText || state.lastCapturedText.length === 0) {
+      attemptPromptInference(model);
     }
-  } else {
-    debugLog("No prompt text found");
-  }
+  }, 500);
+  
+  return pollingInterval;
 }
 
-// Estimate token count from text - improved version
-function estimateTokenCount(text) {
-  if (!text) return 0;
+function attemptPromptInference(model) {
+  if (state.lastCapturedText && state.lastCapturedText.length > 0) return;
   
-  // More accurate token estimation:
-  // 1. Count words (closer to GPT tokenization)
-  const words = text.trim().split(/\s+/).length;
+  const responses = document.querySelectorAll(SELECTORS.responses.join(', '));
+  if (!responses || responses.length === 0) return;
   
-  // 2. Count special characters that often get their own tokens
-  const specialChars = (text.match(/[.,!?;:(){}\[\]"'`~@#$%^&*_\-+=|\\/<>]/g) || []).length;
+  const latestResponse = responses[responses.length - 1];
+  const responseText = latestResponse.textContent?.trim();
+  if (!responseText || responseText.length < 10) return;
   
-  // 3. Count numbers separately (often tokenized differently)
-  const numbers = (text.match(/\d+/g) || []).join('').length * 0.5;
-  
-  // 4. Count code blocks (often have different tokenization)
-  const codeBlocks = (text.match(/```[\s\S]*?```/g) || []);
-  const codeLength = codeBlocks.reduce((acc, block) => acc + block.length, 0) * 0.5;
-  
-  // Combine factors with weights
-  const estimatedTokens = (words * 1.3) + (specialChars * 0.5) + numbers + codeLength;
-  
-  return Math.ceil(estimatedTokens);
-}
-
-// Calculate impact based on the new research
-function calculateImpact(responseTokens, inputTokens, model) {
-  // Get model factor
-  const modelFactor = MODEL_FACTORS[model] || MODEL_FACTORS.default;
-  const modelParams = MODEL_PARAMETERS[model] || MODEL_PARAMETERS.default;
-  
-  // Based on research: 2 FLOP per active parameter per token
-  const responseFlop = responseTokens * 2 * modelParams * 1e9;
-  
-  // Calculate energy consumption based on research
-  // H100 can do ~989 trillion FLOP/s but at ~10% real utilization
-  // H100 consumes ~1500W at ~70% average power utilization
-  const h100FlopPerSecond = 9.89e14;
-  const utilizationFactor = 0.1;
-  const powerUtilization = 0.7;
-  const gpuPower = 1500; // Watts
-  
-  // Calculate H100 time needed in seconds
-  const h100Time = (responseFlop / h100FlopPerSecond) / utilizationFactor;
-  
-  // Calculate energy in joules (watt-seconds)
-  const energyJoules = h100Time * gpuPower * powerUtilization;
-  
-  // Additional energy for input processing
-  let inputEnergyJoules = 0;
-  if (inputTokens > 0) {
-    if (inputTokens <= 10000) {
-      // For inputs up to 10k tokens, scale linearly
-      inputEnergyJoules = (2.5 * 3600) * (inputTokens / 10000);
-    } else {
-      // For very large inputs, scale non-linearly
-      inputEnergyJoules = ((40 * 3600) * (inputTokens / 100000));
-    }
-  }
-  
-  const totalEnergyJoules = energyJoules + inputEnergyJoules;
-  
-  // Calculate other impacts
-  const waterUsage = responseTokens * IMPACT_FACTORS.waterPerToken * modelFactor;
-  const carbonEmissions = responseTokens * IMPACT_FACTORS.carbonPerToken * modelFactor;
-  const cost = responseTokens * IMPACT_FACTORS.costPerToken * modelFactor;
-  
-  // Create impact object
-  const impact = {
-    waterUsage: waterUsage,
-    carbonEmissions: carbonEmissions,
-    energyConsumption: totalEnergyJoules,
-    cost: cost,
-    tokenCount: responseTokens,
-    model: model,
-    site: currentSite
-  };
-  
-  return impact;
-}
-
-// Add this function to help debug
-function debugLog(message, data = null) {
-  const timestamp = new Date().toISOString().substring(11, 19);
-  if (data) {
-    console.log(`[AI WASTE WATCHER ${timestamp}]`, message, data);
-  } else {
-    console.log(`[AI WASTE WATCHER ${timestamp}]`, message);
-  }
-  
-  // Also update debug panel if it exists
-  const debugPanel = document.getElementById('ai-waste-debug');
-  if (debugPanel) {
-    debugPanel.style.display = 'block';
-    debugPanel.textContent = `Status: ${message} (${timestamp})`;
-  }
-}
-
-// Update the processPrompt function to sync data with the popup
-function processPrompt(text, model) {
-  debugLog("Prompt detected in processPrompt function:", text.substring(0, 30) + "...");
-  
-  // Calculate input tokens with improved estimation
-  const inputTokens = estimateTokenCount(text);
-  
-  // Estimate response tokens based on input length
-  // LLMs typically generate responses proportional to the input
-  let responseTokens = Math.min(Math.max(inputTokens * 2, 100), 2000);
-  
-  // Model-specific adjustments
-  if (model === 'gpt-4o' || model === 'gpt-4') {
-    // GPT-4 models tend to be more verbose
-    responseTokens = responseTokens * 1.2;
-  } else if (model === 'claude') {
-    // Claude can also be verbose
-    responseTokens = responseTokens * 1.3;
-  }
-  
-  debugLog(`Token estimation - Input: ${inputTokens}, Expected response: ${Math.round(responseTokens)}`);
-  
-  // Calculate environmental impact
-  const impact = calculateImpact(Math.round(responseTokens), inputTokens, model);
-  
-  // Add to running totals
-  totalStats.cost += impact.cost;
-  totalStats.energyConsumption += impact.energyConsumption;
-  totalStats.waterUsage += impact.waterUsage;
-  totalStats.carbonEmissions += impact.carbonEmissions;
-  totalStats.promptCount += 1;
-  
-  debugLog("Calculated impact:", impact);
-  debugLog("Running totals:", totalStats);
-  
-  // Show live preview with cumulative stats
-  updateLivePreview(totalStats);
-  
-  // Send the impact data to the background script
-  chrome.runtime.sendMessage({
-    action: "promptDetected", 
-    data: impact
-  }, response => {
-    debugLog("Background script response:", response);
+  if (responseText !== state.lastResponseText) {
+    debugLog("Inferring prompt from AI response");
+    state.lastResponseText = responseText;
     
-    // Update the popup if it's open by broadcasting the updated stats
-    if (response && response.data) {
-      chrome.runtime.sendMessage({
-        action: "statsUpdated",
-        data: response.data
-      }).catch(e => {
-        // This is expected to fail if popup isn't open, so we'll silently catch the error
-      });
-    }
-  });
+    const inferredLength = Math.max(Math.floor(responseText.length / 3), 20);
+    
+    processPrompt(
+      `[INFERRED PROMPT] Based on AI response length of ${responseText.length} characters`,
+      model
+    );
+  }
 }
 
 // Observe page changes to detect newly added elements
@@ -1132,27 +338,896 @@ function observePageChanges() {
   debugLog("Page change observer started");
 }
 
-// Initialize on page load
+// ======= Prompt Processing =======
+
+function capturePrompt(model) {
+  if (state.processingPrompt) {
+    debugLog("Already processing a prompt, skipping duplicate");
+    return;
+  }
+  
+  if (state.promptDebounceTimeout) {
+    clearTimeout(state.promptDebounceTimeout);
+  }
+  
+  state.promptDebounceTimeout = setTimeout(() => {
+    capturePromptImpl(model);
+    setTimeout(() => {
+      state.processingPrompt = false;
+    }, 2000);
+  }, DEBOUNCE_DELAY);
+}
+
+function capturePromptImpl(model) {
+  state.processingPrompt = true;
+  
+  const textareas = document.querySelectorAll('textarea');
+  const inputFields = document.querySelectorAll('[role="textbox"], [contenteditable="true"]');
+  const inputs = document.querySelectorAll('input[type="text"]');
+  
+  let promptText = '';
+  let sourceElement = null;
+  
+  // Check multiple input sources in order of priority
+  const inputSources = [
+    { elements: textareas, accessor: 'value', label: 'textarea' },
+    { elements: inputFields, accessor: 'textContent', label: 'contentEditable' },
+    { elements: inputs, accessor: 'value', label: 'input' }
+  ];
+  
+  // Try each input source until we find content
+  for (const source of inputSources) {
+    if (promptText) break;
+    
+    for (const el of source.elements) {
+      const content = el[source.accessor];
+      if (content && content.trim().length > 0) {
+        promptText = content;
+        sourceElement = el;
+        debugLog(`Found prompt in ${source.label}: ${promptText.substring(0, 30)}...`);
+        break;
+      }
+    }
+  }
+  
+  // If still no prompt, try fallback methods
+  if (!promptText) {
+    const fallbackMethods = [
+      // Use last prompt if recent
+      () => {
+        if (state.lastPromptText && Date.now() - state.lastPromptTime < 5000) {
+          promptText = state.lastPromptText;
+          debugLog(`Using last recorded prompt: ${promptText.substring(0, 30)}...`);
+          return true;
+        }
+        return false;
+      },
+      // Look for user message elements
+      () => {
+        const messageElements = document.querySelectorAll(SELECTORS.userMessages);
+        if (messageElements.length > 0) {
+          const lastMessage = messageElements[messageElements.length - 1];
+          if (lastMessage && lastMessage.textContent) {
+            promptText = lastMessage.textContent;
+            debugLog(`Found prompt in message element: ${promptText.substring(0, 30)}...`);
+            return true;
+          }
+        }
+        return false;
+      },
+      // Default test prompt in development
+      () => {
+        if (state.currentSite) {
+          debugLog("No prompt found, creating test prompt");
+          promptText = "Test prompt: please process this AI query as if it were typed by a user.";
+          return true;
+        }
+        return false;
+      }
+    ];
+    
+    for (const method of fallbackMethods) {
+      if (method()) break;
+    }
+  }
+  
+  if (promptText) {
+    const isDuplicate = promptText === state.lastPromptText && (Date.now() - state.lastPromptTime < 5000);
+    
+    if (!isDuplicate) {
+      debugLog(`Processing prompt (length: ${promptText.length})`);
+      processPrompt(promptText, model);
+      state.lastPromptText = promptText;
+      state.lastPromptTime = Date.now();
+    } else {
+      debugLog("Skipping duplicate prompt (same text processed recently)");
+    }
+  } else {
+    debugLog("No prompt text found");
+  }
+}
+
+function processPrompt(text, model) {
+  debugLog("Prompt detected in processPrompt function:", text.substring(0, 30) + "...");
+  
+  // Calculate input tokens
+  const inputTokens = estimateTokenCount(text);
+  
+  // Instead of estimating, we'll capture responses and calculate real tokens
+  const modelConfig = AI_MODELS[model] || AI_MODELS.default;
+  
+  // Create an initial impact with just input tokens
+  const initialImpact = calculatePartialImpact(0, inputTokens, model);
+  
+  // Update stats UI immediately with just the input contribution
+  updateStatsWithPrompt(initialImpact);
+  
+  // Set up a response observer to capture and calculate the actual response
+  captureResponse(model, inputTokens, initialImpact);
+  
+  debugLog(`Token calculation - Input tokens: ${inputTokens}, waiting for response...`);
+}
+
+// Handle just the prompt portion initially
+function updateStatsWithPrompt(impact) {
+  // Update totals for input processing only
+  Object.keys(impact).forEach(key => {
+    if (typeof impact[key] === 'number' && state.totalStats.hasOwnProperty(key)) {
+      state.totalStats[key] += impact[key];
+    }
+  });
+  state.totalStats.promptCount += 1;
+  
+  // Update UI
+  updateLivePreview(state.totalStats);
+  
+  // Send initial impact data
+  safeSendMessage({
+    action: "promptDetected", 
+    data: impact
+  });
+}
+
+// Calculate impact based on input tokens only, without response estimation
+function calculatePartialImpact(responseTokens, inputTokens, model) {
+  const modelConfig = AI_MODELS[model] || AI_MODELS.default;
+  
+  // Calculate input processing energy
+  const inputEnergyJoules = inputTokens <= 10000
+    ? (2.5 * 3600) * (inputTokens / 10000)
+    : (40 * 3600) * (inputTokens / 100000);
+  
+  return {
+    waterUsage: 0, // Will be updated when response is captured
+    carbonEmissions: 0, // Will be updated when response is captured
+    energyConsumption: inputEnergyJoules,
+    cost: 0, // Will be updated when response is captured
+    inputTokenCount: inputTokens,
+    responseTokenCount: 0, // Will be updated when response is captured
+    model,
+    site: state.currentSite
+  };
+}
+
+// Capture the actual AI response and update calculations
+function captureResponse(model, inputTokens, initialImpact) {
+  let responseCheckInterval;
+  let timeoutId;
+  let isProcessing = false;
+  
+  // Function to check existing responses on the page
+  const checkForCompletedResponses = () => {
+    if (isProcessing) return;
+    
+    const responseElements = document.querySelectorAll(SELECTORS.responses.join(', '));
+    if (!responseElements || responseElements.length === 0) return;
+    
+    // Focus on the most recent response element
+    const latestResponse = responseElements[responseElements.length - 1];
+    if (!latestResponse || !latestResponse.textContent) return;
+    
+    const responseText = latestResponse.textContent.trim();
+    if (!responseText || responseText.length < 10) return;
+    
+    // Important: Create a unique response ID based on content
+    const responseId = `${model}-${responseText.length}-${responseText.substring(0, 20)}`;
+    
+    // Check if we've already processed this exact response
+    if (state.processedResponses && state.processedResponses[responseId]) {
+      return; // Skip if already processed this exact response
+    }
+    
+    // Detect if the response has stopped changing
+    if (responseText === state.lastResponseText) {
+      // We've seen this text before, but let's make sure it's stable
+      if (!latestResponse.dataset.awStableChecks) {
+        latestResponse.dataset.awStableChecks = '1';
+      } else {
+        const stableChecks = parseInt(latestResponse.dataset.awStableChecks) + 1;
+        latestResponse.dataset.awStableChecks = stableChecks.toString();
+        
+        // After 3 consecutive checks with the same content, consider it complete
+        if (stableChecks >= 3) {
+          processCompletedResponse(responseText, responseId);
+        }
+      }
+    } else {
+      // Response is still changing, update our last seen text
+      state.lastResponseText = responseText;
+      latestResponse.dataset.awStableChecks = '0';
+    }
+  };
+
+  // Process the completed response
+  const processCompletedResponse = (responseText, responseId) => {
+    if (isProcessing) return;
+    isProcessing = true;
+    
+    // Initialize processed responses tracking if needed
+    if (!state.processedResponses) {
+      state.processedResponses = {};
+    }
+    
+    // Mark this response as processed
+    state.processedResponses[responseId] = true;
+    
+    // Clear the interval and timeout since we found a response
+    clearInterval(responseCheckInterval);
+    clearTimeout(timeoutId);
+    
+    debugLog(`Processing completed response (length: ${responseText.length})`);
+    
+    // Calculate actual tokens in the response
+    const responseTokens = estimateTokenCount(responseText);
+    debugLog(`Response captured with ${responseTokens} tokens`);
+    
+    // Calculate full impact with real response tokens
+    const fullImpact = calculateImpact(responseTokens, inputTokens, model);
+    
+    // Calculate delta (just the response portion)
+    const deltaImpact = {
+      waterUsage: fullImpact.waterUsage - (initialImpact.waterUsage || 0),
+      carbonEmissions: fullImpact.carbonEmissions - (initialImpact.carbonEmissions || 0),
+      energyConsumption: fullImpact.energyConsumption - initialImpact.energyConsumption,
+      cost: fullImpact.cost - (initialImpact.cost || 0),
+      tokenCount: responseTokens,
+      inputTokenCount: inputTokens, // Add input tokens for history tracking
+      model,
+      site: state.currentSite,
+      text: responseText.substring(0, 100) + (responseText.length > 100 ? "..." : "") // Store preview of response
+    };
+    
+    // Update totals with the response contribution
+    Object.keys(deltaImpact).forEach(key => {
+      if (typeof deltaImpact[key] === 'number' && state.totalStats.hasOwnProperty(key)) {
+        state.totalStats[key] += deltaImpact[key];
+      }
+    });
+    
+    // Update UI immediately
+    updateLivePreview(state.totalStats);
+    
+    // Send the updated impact data
+    safeSendMessage({
+      action: "responseDetected",
+      data: deltaImpact
+    });
+    
+    // Broadcast updated stats to extension popup
+    broadcastStatsToExtension(state.totalStats);
+  };
+
+  // Also set up a MutationObserver to catch new responses being added
+  const responseObserver = new MutationObserver((mutations) => {
+    let newResponseFound = false;
+    
+    // Look for newly added responses
+    for (const mutation of mutations) {
+      if (mutation.type !== 'childList') continue;
+      
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+        
+        // Check if this is a response node or contains one
+        const isResponseNode = SELECTORS.responses.some(selector => 
+          (node.matches && node.matches(selector)) || 
+          (node.querySelector && node.querySelector(selector))
+        );
+        
+        if (isResponseNode) {
+          newResponseFound = true;
+          break;
+        }
+      }
+      
+      if (newResponseFound) break;
+    }
+    
+    // If we detect a new response was added, check it
+    if (newResponseFound) {
+      checkForCompletedResponses();
+    }
+  });
+  
+  // Start the polling interval to check for completed responses
+  responseCheckInterval = setInterval(checkForCompletedResponses, 1000);
+  
+  // Start observing DOM changes to catch new responses
+  responseObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+    characterData: true
+  });
+  
+  // Set a timeout to clean up if we don't get a response
+  timeoutId = setTimeout(() => {
+    debugLog("Response observation timed out");
+    clearInterval(responseCheckInterval);
+    responseObserver.disconnect();
+    
+    // Check if we already processed a response
+    if (!isProcessing) {
+      debugLog("No response detected within timeout period");
+      
+      // Try one final check for any response content
+      checkForCompletedResponses();
+      
+      // If still no response, we'll use a conservative approach
+      // but we won't estimate anything - just report what we observed
+      if (!isProcessing) {
+        debugLog("Using zero impact for response due to detection failure");
+        
+        // Update UI to show just the input impact
+        updateLivePreview(state.totalStats);
+      }
+    }
+  }, 45000); // 45 second timeout
+}
+
+// Fix the UI update function to properly display the actual values
+function updateLivePreview(stats) {
+  if (!state.livePreviewElement) return;
+  
+  const statsContainer = document.getElementById('ai-waste-stats');
+  if (!statsContainer) return;
+  
+  // Calculate watt-hours (convert joules to watt-hours)
+  const energyInWattHours = stats.energyConsumption / 3600;
+  
+  // Format numbers for better display
+  const formatCost = (cost) => {
+    return cost < 0.01 
+      ? `$${cost.toFixed(5)}` 
+      : `$${cost.toFixed(4)}`;
+  };
+  
+  const formatEnergy = (energy) => {
+    if (energy < 0.001) {
+      return `${(energy * 1000).toFixed(2)} mWh`;
+    } else if (energy < 1) {
+      return `${energy.toFixed(3)} Wh`;
+    } else if (energy < 1000) {
+      return `${energy.toFixed(1)} Wh`;
+    } else {
+      return `${(energy / 1000).toFixed(2)} kWh`;
+    }
+  };
+  
+  const formatWater = (ml) => {
+    if (ml < 1) {
+      return `${(ml * 1000).toFixed(1)} μL`;
+    } else if (ml < 1000) {
+      return `${ml.toFixed(1)} mL`;
+    } else {
+      return `${(ml / 1000).toFixed(3)} L`;
+    }
+  };
+  
+  const formatCarbon = (g) => {
+    if (g < 1) {
+      return `${(g * 1000).toFixed(1)} mg`;
+    } else if (g < 1000) {
+      return `${g.toFixed(2)} g`;
+    } else {
+      return `${(g / 1000).toFixed(3)} kg`;
+    }
+  };
+  
+  statsContainer.innerHTML = `
+    <div>
+      <div style="font-weight: bold; color: #d8b4fe;">Total Cost:</div>
+      <div>${formatCost(stats.cost)}</div>
+    </div>
+    <div>
+      <div style="font-weight: bold; color: #fcd34d;">Total Energy:</div>
+      <div>${formatEnergy(energyInWattHours)}</div>
+    </div>
+    <div>
+      <div style="font-weight: bold; color: #93c5fd;">Total Water:</div>
+      <div>${formatWater(stats.waterUsage)}</div>
+    </div>
+    <div>
+      <div style="font-weight: bold; color: #86efac;">Total Carbon:</div>
+      <div>${formatCarbon(stats.carbonEmissions)}</div>
+    </div>
+    <div style="grid-column: span 2; margin-top: 4px; font-size: 10px; text-align: center; color: #aaa;">
+      Prompts analyzed: ${stats.promptCount}
+    </div>
+  `;
+  
+  // Debug info - add token counts if available
+  if (state.lastCapturedText) {
+    const debugInfo = document.createElement('div');
+    debugInfo.style.cssText = `
+      grid-column: span 2;
+      margin-top: 8px;
+      font-size: 9px;
+      color: #888;
+      border-top: 1px solid #444;
+      padding-top: 6px;
+    `;
+    debugInfo.textContent = `Last prompt: ~${estimateTokenCount(state.lastCapturedText)} tokens`;
+    statsContainer.appendChild(debugInfo);
+  }
+}
+
+// ======= Site-Specific Detectors =======
+
+// Create site-specific detectors, now much DRYer
+function createSiteDetector(model, buttonSelector) {
+  return function() {
+    debugLog(`Setting up ${model} detection`);
+    setupPromptHooks(model);
+    
+    // Add click event for button-based input
+    if (buttonSelector) {
+      document.addEventListener('click', function(e) {
+        const sendButton = e.target.closest(buttonSelector);
+        if (sendButton) {
+          debugLog(`${model} send button clicked`);
+          setTimeout(() => {
+            const textareas = document.querySelectorAll('textarea');
+            for (const textarea of textareas) {
+              if (textarea._lastValue && textarea._lastValue.trim().length > 0) {
+                processPrompt(textarea._lastValue, model);
+                break;
+              }
+            }
+          }, 100);
+        }
+      }, true);
+    }
+  };
+}
+
+// Define site-specific detectors using the factory function
+detectors.detectChatGPT = createSiteDetector('gpt-4o', SELECTORS.buttons.chatgpt);
+detectors.detectClaude = createSiteDetector('claude', SELECTORS.buttons.claude);
+detectors.detectPerplexity = createSiteDetector('perplexity', SELECTORS.buttons.perplexity);
+detectors.detectGoogleAI = createSiteDetector('gemini', SELECTORS.buttons.gemini);
+detectors.detectHuggingFace = createSiteDetector('default', SELECTORS.buttons.huggingface);
+detectors.detectGenericAI = createSiteDetector('default', SELECTORS.buttons.generic);
+
+// ======= UI Management =======
+
+function injectLivePreview() {
+  if (state.livePreviewElement) {
+    if (state.livePreviewElement.style.display === 'none') {
+      state.livePreviewElement.style.display = 'block';
+    }
+    return;
+  }
+  
+  state.livePreviewElement = document.createElement('div');
+  state.livePreviewElement.className = 'ai-waste-watcher-preview';
+  state.livePreviewElement.style.cssText = `
+    position: fixed;
+    background: rgba(33, 33, 33, 0.95);
+    color: white;
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 12px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+    z-index: 10000;
+    max-width: 300px;
+    backdrop-filter: blur(5px);
+  `;
+  
+  state.livePreviewElement.innerHTML = `
+    <div style="margin-bottom: 8px; font-weight: bold; display: flex; align-items: center; border-bottom: 1px solid #444; padding-bottom: 8px;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-right: 6px;">
+        <path d="M13 16.9V17.9C13 18.4 13.4 18.9 13.9 18.9H16.9C17.4 18.9 17.9 18.5 17.9 17.9V16.9C17.9 16.4 17.5 15.9 16.9 15.9H14.9C14.4 15.9 13.9 16.4 13.9 16.9H13Z" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M16.9 9H14C13.4 9 13 9.4 13 10V14.9H13.9H16.9C17.5 14.9 17.9 14.5 17.9 13.9V10C18 9.4 17.5 9 16.9 9Z" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M16.9 8.9V7.9C16.9 7.4 16.5 6.9 15.9 6.9H13.9C13.4 6.9 12.9 7.3 12.9 7.9V12.9H13.9H15.9C16.4 12.9 16.9 12.5 16.9 11.9V8.9Z" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M13 5V7.9C13 8.5 12.6 8.9 12 8.9H8C7.4 8.9 7 8.5 7 7.9V5C7 4.4 7.4 4 8 4H12C12.6 4 13 4.4 13 5Z" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M7 9V11.9C7 12.5 7.4 12.9 8 12.9H12C12.6 12.9 13 12.5 13 11.9V9H8C7.4 9 7 9.4 7 9Z" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M7.1 13H6.1C5.5 13 5.1 13.4 5.1 14V16C5.1 16.6 5.5 17 6.1 17H10.1C10.7 17 11.1 16.6 11.1 16V14C11.1 13.4 10.7 13 10.1 13H8.1" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M5 19.2V5C5 4.4 4.6 4 4 4C3.4 4 3 4.4 3 5V19.2C3 19.7 3.3 20 3.7 20H20.2C20.6 20 21 19.7 21 19.2C21 18.8 20.7 18.4 20.2 18.4H5" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      AI Waste Watcher
+      <span style="margin-left: auto; cursor: pointer; color: #aaa;" id="ai-waste-close">×</span>
+    </div>
+    <div id="ai-waste-stats" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 11px;">
+      <div>
+        <div style="font-weight: bold; color: #d8b4fe;">Total Cost:</div>
+        <div>$0.00</div>
+      </div>
+      <div>
+        <div style="font-weight: bold; color: #fcd34d;">Total Energy:</div>
+        <div>0.00 Wh</div>
+      </div>
+      <div>
+        <div style="font-weight: bold; color: #93c5fd;">Total Water:</div>
+        <div>0 mL</div>
+      </div>
+      <div>
+        <div style="font-weight: bold; color: #86efac;">Total Carbon:</div>
+        <div>0 g</div>
+      </div>
+      <div style="grid-column: span 2; margin-top: 4px; font-size: 10px; text-align: center; color: #aaa;">
+        Prompts analyzed: 0
+      </div>
+    </div>
+    <div id="ai-waste-debug" style="margin-top: 8px; font-size: 10px; color: #aaa; display: none;">
+      Status: Waiting for input...
+    </div>
+  `;
+  
+  // Add the element to the page (removed test button code)
+  document.body.appendChild(state.livePreviewElement);
+  
+  // Add close button functionality
+  document.getElementById('ai-waste-close').addEventListener('click', () => {
+    state.livePreviewElement.style.display = 'none';
+    sessionStorage.setItem('aiWasteWatcherHidden', 'true');
+  });
+  
+  makeDraggable(state.livePreviewElement);
+  
+  // Restore previous position if available
+  const savedX = sessionStorage.getItem('aiWasteWatcherPositionX');
+  const savedY = sessionStorage.getItem('aiWasteWatcherPositionY');
+  
+  if (savedX && savedY) {
+    state.livePreviewElement.style.left = savedX;
+    state.livePreviewElement.style.top = savedY;
+  } else {
+    state.livePreviewElement.style.left = '20px';
+    state.livePreviewElement.style.top = '20px';
+  }
+}
+
+function makeDraggable(element) {
+  element.style.cursor = 'move';
+  
+  let isDragging = false;
+  let offsetX = 0, offsetY = 0;
+  
+  // Handle mousedown to start dragging
+  element.addEventListener('mousedown', e => {
+    // Only handle dragging when clicking on the header area
+    const target = e.target;
+    const isHeader = target.closest('div') === element.firstElementChild;
+    
+    if (!isHeader) return;
+    
+    isDragging = true;
+    // Calculate where inside the box we clicked
+    offsetX = e.clientX - element.offsetLeft;
+    offsetY = e.clientY - element.offsetTop;
+    e.preventDefault();
+  });
+  
+  // Handle mousemove to perform dragging
+  document.addEventListener('mousemove', e => {
+    if (!isDragging) return;
+    
+    // Calculate new position ensuring it stays within viewport
+    let newLeft = e.clientX - offsetX;
+    let newTop = e.clientY - offsetY;
+    
+    // Keep within viewport boundaries
+    const maxX = window.innerWidth - element.offsetWidth;
+    const maxY = window.innerHeight - element.offsetHeight;
+    
+    newLeft = Math.max(0, Math.min(maxX, newLeft));
+    newTop = Math.max(0, Math.min(maxY, newTop));
+    
+    element.style.left = `${newLeft}px`;
+    element.style.top = `${newTop}px`;
+  });
+  
+  // Handle mouseup to stop dragging
+  document.addEventListener('mouseup', () => {
+    if (isDragging) {
+      isDragging = false;
+      
+      // Save position in session storage
+      sessionStorage.setItem('aiWasteWatcherPositionX', element.style.left);
+      sessionStorage.setItem('aiWasteWatcherPositionY', element.style.top);
+    }
+  });
+}
+
+function showLivePreview() {
+  if (state.livePreviewElement) {
+    state.livePreviewElement.style.display = 'block';
+    sessionStorage.removeItem('aiWasteWatcherHidden');
+  } else {
+    injectLivePreview();
+  }
+}
+
+function resetStats() {
+  // Reset all stats in one go
+  Object.keys(state.totalStats).forEach(key => {
+    state.totalStats[key] = 0;
+  });
+  
+  // Update the UI
+  updateLivePreview(state.totalStats);
+}
+
+// ======= Utility Functions =======
+
+// Estimate token count from text
+function estimateTokenCount(text) {
+  if (!text) return 0;
+  
+  const tokenFactors = [
+    { pattern: /\s+/, weight: 1.3, process: text => text.trim().split(/\s+/).length },
+    { pattern: /[.,!?;:(){}\[\]"'`~@#$%^&*_\-+=|\\/<>]/g, weight: 0.5, process: text => (text.match(/[.,!?;:(){}\[\]"'`~@#$%^&*_\-+=|\\/<>]/g) || []).length },
+    { pattern: /\d+/g, weight: 0.5, process: text => (text.match(/\d+/g) || []).join('').length },
+    { pattern: /```[\s\S]*?```/g, weight: 0.5, process: text => (text.match(/```[\s\S]*?```/g) || []).reduce((acc, block) => acc + block.length, 0) }
+  ];
+  
+  let estimatedTokens = 0;
+  
+  // Process each token factor
+  for (const factor of tokenFactors) {
+    estimatedTokens += factor.process(text) * factor.weight;
+  }
+  
+  return Math.ceil(estimatedTokens);
+}
+
+// Calculate environmental impact
+function calculateImpact(responseTokens, inputTokens, model) {
+  const modelConfig = AI_MODELS[model] || AI_MODELS.default;
+  
+  // Based on research: 2 FLOP per active parameter per token
+  const responseFlop = responseTokens * 2 * modelConfig.parameters * 1e9;
+  
+  // H100 GPU parameters
+  const h100FlopPerSecond = 9.89e14;
+  const utilizationFactor = 0.1;
+  const powerUtilization = 0.7;
+  const gpuPower = 1500; // Watts
+  
+  // Calculate H100 time needed in seconds
+  const h100Time = (responseFlop / h100FlopPerSecond) / utilizationFactor;
+  
+  // Calculate energy in joules (watt-seconds)
+  const energyJoules = h100Time * gpuPower * powerUtilization;
+  
+  // Additional energy for input processing with progressive scaling
+  const inputEnergyJoules = inputTokens <= 10000
+    ? (2.5 * 3600) * (inputTokens / 10000)
+    : (40 * 3600) * (inputTokens / 100000);
+  
+  const totalEnergyJoules = energyJoules + inputEnergyJoules;
+  
+  // Calculate other impacts
+  const waterUsage = responseTokens * IMPACT_FACTORS.waterPerToken * modelConfig.factor;
+  const carbonEmissions = responseTokens * IMPACT_FACTORS.carbonPerToken * modelConfig.factor;
+  const cost = responseTokens * IMPACT_FACTORS.costPerToken * modelConfig.factor;
+  
+  return {
+    waterUsage,
+    carbonEmissions,
+    energyConsumption: totalEnergyJoules,
+    cost,
+    tokenCount: responseTokens,
+    model,
+    site: state.currentSite
+  };
+}
+
+function debugLog(message, data = null) {
+  const timestamp = new Date().toISOString().substring(11, 19);
+  if (data) {
+    console.log(`[AI WASTE WATCHER ${timestamp}]`, message, data);
+  } else {
+    console.log(`[AI WASTE WATCHER ${timestamp}]`, message);
+  }
+  
+  // Also update debug panel if it exists
+  const debugPanel = document.getElementById('ai-waste-debug');
+  if (debugPanel) {
+    debugPanel.style.display = 'block';
+    debugPanel.textContent = `Status: ${message} (${timestamp})`;
+  }
+}
+
+// Replace broadcastStatsToExtension implementation
+
+function broadcastStatsToExtension(stats) {
+  safeSendMessage({
+    action: "statsUpdated",
+    data: {
+      cost: stats.cost,
+      energyConsumption: stats.energyConsumption,
+      waterUsage: stats.waterUsage,
+      carbonEmissions: stats.carbonEmissions,
+      promptCount: stats.promptCount
+    }
+  });
+}
+
+// Replace your existing message listener with this version that properly handles invalid contexts
+chrome.runtime.onMessage.addListener(function messageHandler(message, sender, sendResponse) {
+  try {
+    if (message.action === "getCurrentStats") {
+      debugLog("Stats requested by popup");
+      sendResponse({
+        status: "success",
+        data: state.totalStats || {
+          cost: 0,
+          energyConsumption: 0,
+          waterUsage: 0,
+          carbonEmissions: 0,
+          promptCount: 0
+        }
+      });
+      return true; // Keep the message channel open for async response
+    }
+    return false; // Let other listeners handle other messages
+  } catch (err) {
+    // Handle the extension context invalidated error gracefully
+    if (err.message && err.message.includes('Extension context invalidated')) {
+      console.log("Extension context has been invalidated. Please refresh the page.");
+      
+      // Remove this message listener to prevent further errors
+      try {
+        chrome.runtime.onMessage.removeListener(messageHandler);
+      } catch (e) {
+        // Ignore errors during cleanup
+      }
+    } else {
+      console.error("Error handling message:", err);
+    }
+    return false;
+  }
+});
+
+// Also add a message listener for requesting current stats from the popup
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === "getCurrentStats") {
+    debugLog("Stats requested by popup");
+    sendResponse({
+      status: "success",
+      data: state.totalStats
+    });
+    return true;
+  }
+  return false; // Let other listeners handle other messages
+});
+
+// Improved sync interval function with error recovery
+function startStatsSyncInterval() {
+  let syncIntervalId = null;
+  
+  // Create a function that can be self-referenced for removal
+  const syncStats = async () => {
+    try {
+      // Check if runtime exists and is valid first
+      if (chrome.runtime && chrome.runtime.id) {
+        // Test with a simple API call first
+        await chrome.storage.local.get('test').catch(() => {
+          throw new Error('Extension context invalidated');
+        });
+        
+        // If we made it here, the context is valid
+        if (state.totalStats) {
+          broadcastStatsToExtension(state.totalStats);
+        }
+      }
+    } catch (e) {
+      // If we get an extension context error, stop the interval
+      if (e.message && (
+          e.message.includes('Extension context invalidated') || 
+          e.message.includes('Invalid extension context') ||
+          !chrome.runtime || !chrome.runtime.id
+      )) {
+        console.log("Extension context invalidated, stopping sync interval");
+        clearInterval(syncIntervalId);
+        syncIntervalId = null;
+      }
+    }
+  };
+  
+  syncIntervalId = setInterval(syncStats, 5000); // Sync every 5 seconds
+  return syncIntervalId;
+}
+
+// Add cleanup for processed responses to avoid memory leaks
+function cleanupProcessedResponses() {
+  if (!state.processedResponses) return;
+  
+  const now = Date.now();
+  const maxAge = 5 * 60 * 1000; // 5 minutes
+  
+  // If we have too many cached responses (>100) or they're old, clean up
+  if (Object.keys(state.processedResponses).length > 100 || 
+      state.lastProcessedResponseCleanup && now - state.lastProcessedResponseCleanup > maxAge) {
+    state.processedResponses = {};
+    state.lastProcessedResponseCleanup = now;
+  }
+}
+
+// Add cleanup call to an interval
+setInterval(cleanupProcessedResponses, 60000); // Clean up every minute
+
+// ======= Initialization =======
+
 window.addEventListener('load', () => {
-  // Check connection with background script
   debugLog("Content script loaded, sending ping to background script");
-  chrome.runtime.sendMessage({action: "ping"}, function(response) {
+  
+  safeSendMessage({action: "ping"}, function(response) {
     if (response && response.status === "pong") {
       debugLog("Connection with background script confirmed!");
+      startStatsSyncInterval(); // Start syncing stats
     } else {
       debugLog("No response from background script, may need to reload extension");
     }
   });
   
-  // Check if we're on an AI site
-  chrome.runtime.sendMessage({action: "checkCurrentSite"});
+  safeSendMessage({action: "checkCurrentSite"});
   
-  // Set up a fallback detection mechanism
+  // Fallback detection
   setTimeout(() => {
-    if (!observingTextarea) {
+    if (!state.observingTextarea) {
       console.log("Fallback detection initialized");
       setupPromptDetection();
       injectLivePreview();
     }
   }, 3000);
 });
+
+// Add this utility function for safer message sending
+function safeSendMessage(message, callback) {
+  try {
+    // First verify that chrome.runtime exists and has a valid ID
+    if (!chrome.runtime || !chrome.runtime.id) {
+      debugLog("Extension context unavailable");
+      return Promise.reject(new Error("Extension context unavailable"));
+    }
+    
+    const sendPromise = chrome.runtime.sendMessage(message);
+    
+    if (callback && typeof callback === 'function') {
+      sendPromise.then(callback).catch(err => {
+        // Silently fail for expected errors
+        if (err.message !== "The message port closed before a response was received") {
+          debugLog("Error sending message", err);
+        }
+      });
+    }
+    
+    return sendPromise;
+  } catch (err) {
+    // Handle "Extension context invalidated" error gracefully
+    if (err.message && (
+        err.message.includes('Extension context invalidated') ||
+        err.message.includes('Invalid extension context')
+    )) {
+      console.log("Extension has been reloaded or updated. Please refresh the page.");
+    } else {
+      debugLog("Error in message sending", err);
+    }
+    
+    return Promise.reject(err);
+  }
+}
