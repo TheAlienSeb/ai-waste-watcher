@@ -488,8 +488,10 @@ async function storeResponseData(data) {
     const prompts = result.prompts || [];
     const processedItems = result.processedItems || {};
     
-    // Create a fingerprint of this response data
-    const fingerprint = `${data.model}-${data.site}-${data.tokenCount}-${data.inputTokenCount}`;
+    // Create a fingerprint of this response data with more details
+    // Include a portion of the response text if available to better identify duplicates
+    const textFingerprint = data.text ? data.text.substring(0, 50).replace(/\s+/g, '') : '';
+    const fingerprint = `${data.model}-${data.site}-${data.tokenCount}-${data.inputTokenCount}-${textFingerprint}`;
     
     // Check if we've seen this item within the last hour
     const now = Date.now();
@@ -497,7 +499,7 @@ async function storeResponseData(data) {
     
     if (processedItems[fingerprint] && (now - processedItems[fingerprint]) < oneHour) {
       console.log("Detected duplicate response via fingerprint, skipping storage");
-      return totalStats;
+      return result.totalStats || {};
     }
     
     // Record this item to prevent duplicates

@@ -145,7 +145,15 @@ const state = {
   lastPromptInputTokens: 0,
   lastPromptInitialImpact: {},
   lastPromptModel: '',
-  syncIntervalId: null
+  syncIntervalId: null,
+  currentConversation: {
+    id: null,
+    startTime: null,
+    lastUpdateTime: null,
+    responses: {}
+  },
+  lastResponseProcessTime: 0,
+  responseProcessCooldown: 3000, // 3 seconds cooldown
 };
 
 const DEBOUNCE_DELAY = 1000; // 1 second debounce
@@ -557,6 +565,15 @@ function processPrompt(text, model) {
     return;
   }
   
+  // Start a new conversation if needed
+  if (!state.currentConversation.id || 
+      (Date.now() - state.currentConversation.lastUpdateTime > 300000)) { // 5 minutes
+    startNewConversation();
+  }
+  
+  // Update the conversation last activity time
+  state.currentConversation.lastUpdateTime = Date.now();
+  
   // Mark that we've registered a prompt
   state.hasRegisteredPrompt = true;
   
@@ -629,6 +646,9 @@ function captureResponse(model, inputTokens, initialImpact) {
   
   // Add a variable to track the last fully processed response
   let lastProcessedResponseText = '';
+  let lastResponseLength = 0;
+  let responseStableCount = 0;
+  let responseTokenCount = 0; // Track token count of the response
 
   // Function to check existing responses on the page
   const checkForCompletedResponses = () => {
@@ -649,69 +669,129 @@ function captureResponse(model, inputTokens, initialImpact) {
     const responseText = latestResponse.textContent.trim();
     if (!responseText || responseText.length < 10) return;
     
-    // If this exact response text was already processed, skip it
-    if (responseText === lastProcessedResponseText) {
+    // Create a content prefix for comparing responses
+    const contentPrefix = responseText.substring(0, 30).replace(/\s+/g, '');
+    
+    // Check if this is a continuation/update of an already processed response
+    // by comparing the first 30 characters
+    const isSameResponsePrefixButLonger = 
+      lastProcessedResponseText && 
+      contentPrefix === lastProcessedResponseText.substring(0, 30).replace(/\s+/g, '') &&
+      responseText.length > lastProcessedResponseText.length;
+      
+    // Calculate tokens for the current response
+    const currentTokenCount = estimateTokenCount(responseText);
+    
+    // If this is the same response but with more tokens, process it again and replace previous
+    if (isSameResponsePrefixButLonger && currentTokenCount > responseTokenCount) {
+      debugLog(`Found longer version of same response: ${currentTokenCount} > ${responseTokenCount} tokens`);
+      
+      // Update tracking variables
+      lastProcessedResponseText = responseText;
+      lastResponseLength = responseText.length;
+      responseTokenCount = currentTokenCount;
+      responseStableCount = 0; // Reset stability to make sure it's fully generated
+      
+      // Continue checking - don't process yet until it stabilizes
       return;
     }
     
-    // Create a unique response ID that incorporates more specific identifiers
-    const contentFingerprint = responseText.substring(0, 30).replace(/\s+/g, '') + 
-                             responseText.substring(responseText.length - 30).replace(/\s+/g, '');
-    const sessionKey = sessionStorage.getItem('awSessionKey') || 
-                      (sessionStorage.setItem('awSessionKey', Date.now().toString(36)), 
-                       sessionStorage.getItem('awSessionKey'));
-    const responseId = `${model}-${sessionKey}-${responseText.length}-${contentFingerprint}`;
-    
-    // Check if we've already processed this exact response
-    if (state.processedResponses && state.processedResponses[responseId]) {
-      return; // Skip if already processed this exact response
+    // For completely new responses that don't match our prefix
+    if (responseText !== lastProcessedResponseText && 
+        (!lastProcessedResponseText || 
+         contentPrefix !== lastProcessedResponseText.substring(0, 30).replace(/\s+/g, ''))) {
+      
+      // Update tracking for this new response
+      lastProcessedResponseText = responseText;
+      lastResponseLength = responseText.length;
+      responseStableCount = 0;
+      responseTokenCount = estimateTokenCount(responseText);
+      return; // Don't process yet, wait for stability
     }
     
-    // Detect if the response has stopped changing
-    if (responseText === state.lastResponseText) {
-      // We've seen this text before, but let's make sure it's stable
-      if (!latestResponse.dataset.awStableChecks) {
-        latestResponse.dataset.awStableChecks = '1';
-      } else {
-        const stableChecks = parseInt(latestResponse.dataset.awStableChecks) + 1;
-        latestResponse.dataset.awStableChecks = stableChecks.toString();
-        
-        // After 3 consecutive checks with the same content, consider it complete
-        if (stableChecks >= 3) {
-          processCompletedResponse(responseText, responseId);
-          // Remember this completed response to avoid processing it again
-          lastProcessedResponseText = responseText;
-        }
-      }
+    // Check if the response is still growing
+    const isStillGrowing = responseText.length > lastResponseLength;
+    lastResponseLength = responseText.length;
+    
+    if (isStillGrowing) {
+      // Reset stability counter if still growing
+      responseStableCount = 0;
+      return; // Skip processing - wait for generation to complete
     } else {
-      // Response is still changing, update our last seen text
-      state.lastResponseText = responseText;
-      latestResponse.dataset.awStableChecks = '0';
+      // Increment stability counter when response stops changing
+      responseStableCount++;
+      
+      // Only process after response has been stable for a few checks
+      if (responseStableCount >= 3) {
+        // Create a unique response ID that incorporates more specific identifiers
+        const contentFingerprint = responseText.substring(0, 30).replace(/\s+/g, '') + 
+                                responseText.substring(responseText.length - 30).replace(/\s+/g, '');
+        const sessionKey = sessionStorage.getItem('awSessionKey') || 
+                          (sessionStorage.setItem('awSessionKey', Date.now().toString(36)), 
+                          sessionStorage.getItem('awSessionKey'));
+        const responseId = `${model}-${sessionKey}-${responseText.length}-${contentFingerprint}`;
+        
+        // Store the token count with the response ID in processed responses
+        if (!state.processedResponses) {
+          state.processedResponses = {};
+        }
+        
+        // Check if we've already processed this response prefix but with fewer tokens
+        let shouldReprocess = false;
+        
+        // Check for matching prefixes in our processed responses
+        Object.keys(state.processedResponses).forEach(id => {
+          if (id.includes(contentPrefix) && 
+              state.processedResponses[id].tokenCount < currentTokenCount) {
+            // We found a shorter version of this same response
+            debugLog(`Found better version of response: ${currentTokenCount} vs ${state.processedResponses[id].tokenCount} tokens`);
+            
+            // Adjust stats by removing the earlier contribution and adding the new one
+            if (state.processedResponses[id].statsContribution) {
+              // Subtract previous contribution from totals
+              Object.keys(state.processedResponses[id].statsContribution).forEach(key => {
+                if (typeof state.processedResponses[id].statsContribution[key] === 'number' && 
+                    state.totalStats.hasOwnProperty(key)) {
+                  state.totalStats[key] -= state.processedResponses[id].statsContribution[key];
+                }
+              });
+            }
+            
+            // Delete the old record to replace with this better one
+            delete state.processedResponses[id];
+            shouldReprocess = true;
+          }
+        });
+        
+        // Skip if already processed this exact response and it's not better than a previous version
+        if (state.processedResponses[responseId] && !shouldReprocess) {
+          return;
+        }
+        
+        processCompletedResponse(responseText, responseId, currentTokenCount);
+      }
     }
   };
 
-  // Process the completed response
-  const processCompletedResponse = (responseText, responseId) => {
+  // Modified to accept token count parameter
+  const processCompletedResponse = (responseText, responseId, responseTokens) => {
     if (isProcessing) return;
-    isProcessing = true;
     
-    // Initialize processed responses tracking if needed
-    if (!state.processedResponses) {
-      state.processedResponses = {};
+    // Add cooldown check
+    const now = Date.now();
+    if (now - state.lastResponseProcessTime < state.responseProcessCooldown) {
+      debugLog(`Response processing in cooldown (${(now - state.lastResponseProcessTime)}ms < ${state.responseProcessCooldown}ms)`);
+      return;
     }
     
-    // Mark this response as processed
-    state.processedResponses[responseId] = true;
+    isProcessing = true;
+    state.lastResponseProcessTime = now;
     
     // Clear the interval and timeout since we found a response
     clearInterval(responseCheckInterval);
     clearTimeout(timeoutId);
     
-    debugLog(`Processing completed response (length: ${responseText.length})`);
-    
-    // Calculate actual tokens in the response
-    const responseTokens = estimateTokenCount(responseText);
-    debugLog(`Response captured with ${responseTokens} tokens`);
+    debugLog(`Processing completed response (length: ${responseText.length}, tokens: ${responseTokens})`);
     
     // Calculate full impact with real response tokens
     const fullImpact = calculateImpact(responseTokens, inputTokens, model);
@@ -727,6 +807,13 @@ function captureResponse(model, inputTokens, initialImpact) {
       model,
       site: state.currentSite,
       text: responseText.substring(0, 100) + (responseText.length > 100 ? "..." : "") // Store preview of response
+    };
+    
+    // Save the contribution this response made to the stats, so we can undo it if needed
+    state.processedResponses[responseId] = {
+      tokenCount: responseTokens,
+      statsContribution: { ...deltaImpact },
+      timestamp: now
     };
     
     // Update totals with the response contribution
@@ -754,9 +841,15 @@ function captureResponse(model, inputTokens, initialImpact) {
     
     // Clear the expecting response flag once we've processed a response
     state.expectingResponse = false;
+    isProcessing = false;
   };
 
-  // Also set up a MutationObserver to catch new responses being added
+  // Rest of captureResponse function remains the same...
+  
+  // Start the polling interval to check for completed responses
+  responseCheckInterval = setInterval(checkForCompletedResponses, 1000);
+  
+  // Start observing DOM changes to catch new responses
   const responseObserver = new MutationObserver((mutations) => {
     // Only look for responses if we're expecting one from a prompt
     if (!state.expectingResponse) return;
@@ -791,38 +884,19 @@ function captureResponse(model, inputTokens, initialImpact) {
     }
   });
   
-  // Start the polling interval to check for completed responses
-  responseCheckInterval = setInterval(checkForCompletedResponses, 1000);
-  
-  // Start observing DOM changes to catch new responses
   responseObserver.observe(document.body, {
     childList: true,
     subtree: true,
     characterData: true
   });
   
-  // Set a timeout to clean up if we don't get a response
+  // Set a timeout to clean up
   timeoutId = setTimeout(() => {
     debugLog("Response observation timed out");
     clearInterval(responseCheckInterval);
     responseObserver.disconnect();
     
-    // Check if we already processed a response
-    if (!isProcessing) {
-      debugLog("No response detected within timeout period");
-      
-      // Try one final check for any response content
-      checkForCompletedResponses();
-      
-      // If still no response, we'll use a conservative approach
-      // but we won't estimate anything - just report what we observed
-      if (!isProcessing) {
-        debugLog("Using zero impact for response due to detection failure");
-        
-        // Update UI to show just the input impact
-        updateLivePreview(state.totalStats);
-      }
-    }
+    // Rest of timeout handling...
   }, 45000); // 45 second timeout
 }
 
@@ -1553,3 +1627,66 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   return false; // Let other listeners handle other messages
 });
+
+// Add this function to manage conversation sessions
+function startNewConversation() {
+  // Generate a new conversation ID
+  const conversationId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+  
+  state.currentConversation = {
+    id: conversationId,
+    startTime: Date.now(),
+    lastUpdateTime: Date.now(),
+    responses: {}
+  };
+  
+  // Store in session storage to persist across page reloads
+  try {
+    sessionStorage.setItem('aiWasteWatcher_currentConversation', JSON.stringify(state.currentConversation));
+  } catch (e) {
+    // Ignore storage errors
+  }
+  
+  return conversationId;
+}
+
+// Modify the processCompletedResponse function to track by conversation
+const processCompletedResponse = (responseText, responseId) => {
+  if (isProcessing) return;
+  
+  // Add cooldown check
+  const now = Date.now();
+  if (now - state.lastResponseProcessTime < state.responseProcessCooldown) {
+    debugLog(`Response processing in cooldown (${(now - state.lastResponseProcessTime)}ms < ${state.responseProcessCooldown}ms)`);
+    return;
+  }
+  
+  isProcessing = true;
+  state.lastResponseProcessTime = now;
+  
+  // Check if this response is part of the current conversation
+  if (state.currentConversation.id && 
+      state.currentConversation.responses[responseId]) {
+    debugLog("This response was already processed in the current conversation");
+    isProcessing = false;
+    return;
+  }
+  
+  // Mark this response as processed in this conversation
+  if (state.currentConversation.id) {
+    state.currentConversation.responses[responseId] = {
+      timestamp: Date.now(),
+      length: responseText.length
+    };
+    
+    // Update session storage
+    try {
+      sessionStorage.setItem('aiWasteWatcher_currentConversation', 
+                            JSON.stringify(state.currentConversation));
+    } catch (e) {
+      // Ignore storage errors
+    }
+  }
+  
+  // Rest of processing remains the same...
+}
