@@ -26,9 +26,19 @@ let tabsWithContentScripts = {};
 // Track active tabs with AI sites
 let activeAITabs = {};
 
+// Track session IDs by tab to prevent duplicates on page refresh
+let tabSessions = {};
+
 // Improve URL matching in the listener
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url) {
+    // Generate a new session ID for this tab on page load
+    tabSessions[tabId] = {
+      sessionId: Date.now().toString(36) + Math.random().toString(36).substr(2),
+      url: tab.url,
+      timestamp: Date.now()
+    };
+
     try {
       // Check if the tab is an AI site
       const url = new URL(tab.url);
@@ -173,7 +183,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     
     // Send the latest stats to the popup
     getLatestStats: () => {
-      chrome.storage.local.get(['prompts', 'totalStats'])
+      // First reconcile to ensure accuracy
+      recalculateTotalsFromHistory()
+        .then(() => {
+          // Then fetch the updated stats
+          return chrome.storage.local.get(['prompts', 'totalStats']);
+        })
         .then(result => {
           sendResponse({
             status: "success", 
@@ -214,33 +229,109 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     
     // Reset all stats
     resetAllStats: () => {
-      // Reset storage stats
+      // Call comprehensive reset function
+      performFullReset()
+        .then(() => {
+          // Notify all tabs that stats were reset
+          return notifyAllTabsOfReset();
+        })
+        .then(() => {
+          sendResponse({status: "All stats and history reset successfully"});
+        })
+        .catch(error => {
+          console.error("Error during full reset:", error);
+          sendResponse({status: "error", message: error.message});
+        });
+      
+      return true; // Keep the message channel open
+    },
+
+    // Add to the chrome.runtime.onMessage.addListener function
+
+    statsReset: () => {
+      // Create fresh zeroed stats
+      const zeroStats = {
+        waterUsage: 0,
+        carbonEmissions: 0,
+        energyConsumption: 0,
+        cost: 0,
+        tokenCount: 0,
+        promptCount: 0
+      };
+      
+      // Reset both the history and the totals to ensure complete reset
       chrome.storage.local.set({
-        totalStats: {
-          waterUsage: 0,
-          carbonEmissions: 0,
-          energyConsumption: 0,
-          cost: 0,
-          tokenCount: 0,
-          promptCount: 0
-        },
-        prompts: []
+        totalStats: zeroStats,
+        prompts: [] // Also clear history to ensure nothing adds up
       })
       .then(() => {
-        // Also tell all active tabs to reset their stats
-        resetStatsInAllTabs()
-          .then(() => {
-            sendResponse({status: "All stats reset successfully"});
-          })
-          .catch(error => {
-            console.error("Error resetting tab stats:", error);
-            sendResponse({status: "Stats in storage reset, but some tabs may not have reset"});
-          });
+        console.log("Stats reset in storage");
+        
+        // Broadcast to all tabs that stats were reset
+        chrome.tabs.query({}, function(tabs) {
+          for (const tab of tabs) {
+            try {
+              chrome.tabs.sendMessage(tab.id, {action: "statsResetConfirmed"});
+            } catch (e) {
+              // Ignore errors for tabs that don't have our content script
+            }
+          }
+        });
+        
+        sendResponse({status: "success"});
       })
       .catch(error => {
         console.error("Error resetting stats in storage:", error);
         sendResponse({status: "error", message: error.message});
       });
+      
+      return true; // Keep the message channel open
+    },
+
+    // Add this to your message handlers object in the chrome.runtime.onMessage.addListener function
+
+    statsReset: () => {
+      console.log("Received statsReset message, clearing storage");
+      // Create fresh zeroed stats
+      const zeroStats = {
+        waterUsage: 0,
+        carbonEmissions: 0,
+        energyConsumption: 0,
+        cost: 0,
+        tokenCount: 0,
+        promptCount: 0
+      };
+      
+      // Reset both the history and the totals to ensure complete reset
+      chrome.storage.local.set({
+        totalStats: zeroStats,
+        prompts: [], // Also clear history to ensure nothing adds up
+        recentPrompts: {},
+        processedItems: {},
+        tabMetrics: {}
+      })
+      .then(() => {
+        console.log("Background stats and history have been completely reset");
+        
+        // Broadcast reset confirmation to all tabs
+        chrome.tabs.query({}, function(tabs) {
+          for (const tab of tabs) {
+            try {
+              chrome.tabs.sendMessage(tab.id, {action: "statsResetConfirmed"});
+            } catch (e) {
+              // Ignore errors for tabs that don't have our content script
+            }
+          }
+        });
+        
+        sendResponse({status: "success"});
+      })
+      .catch(error => {
+        console.error("Error resetting stats in storage:", error);
+        sendResponse({status: "error", message: error.message});
+      });
+      
+      return true; // Keep the message channel open
     }
   };
   
@@ -259,11 +350,12 @@ chrome.action.onClicked.addListener((tab) => {
   // Since we have default_popup set in the manifest
 });
 
-// Store prompt data in chrome.storage
+// Update the storePromptData function
+
 async function storePromptData(data) {
   try {
     // Get existing data
-    const result = await chrome.storage.local.get(['prompts', 'totalStats']);
+    const result = await chrome.storage.local.get(['prompts', 'totalStats', 'recentPrompts', 'tabMetrics']);
     
     // Initialize if doesn't exist
     const prompts = result.prompts || [];
@@ -275,28 +367,78 @@ async function storePromptData(data) {
       tokenCount: 0,
       promptCount: 0
     };
+    const tabMetrics = result.tabMetrics || {};
     
-    // Check for duplicate prompts (prevent multiple entries on page refresh)
-    const isDuplicate = prompts.some(prompt => {
-      const timeDiff = new Date() - new Date(prompt.timestamp);
-      const isSameSiteAndModel = prompt.model === data.model && prompt.site === data.site;
-      const isRecentPrompt = timeDiff < 10000; // Within 10 seconds
-      
-      return isSameSiteAndModel && isRecentPrompt;
-    });
+    // Create fingerprint for this prompt
+    const promptFingerprint = `${data.model}-${data.site}-${data.inputTokenCount || 0}`;
+    const recentPrompts = result.recentPrompts || {};
     
-    if (isDuplicate) {
-      console.log("Detected duplicate prompt, skipping storage");
+    // Check for duplicate prompts in the last 10 minutes
+    const now = Date.now();
+    if (recentPrompts[promptFingerprint] && (now - recentPrompts[promptFingerprint]) < 600000) { // 10 minutes
+      console.log("Detected duplicate prompt via fingerprint, skipping");
       return totalStats;
     }
     
-    // Add timestamp to the data
+    // Also check the existing prompts array for exact duplicates (within last 2 minutes)
+    const recentDuplicate = prompts.find(p => {
+      const timeDiff = new Date(now) - new Date(p.timestamp);
+      return p.model === data.model && 
+             p.site === data.site && 
+             Math.abs(p.inputTokens - (data.inputTokenCount || 0)) < 5 &&
+             timeDiff < 120000; // 2 minutes
+    });
+    
+    if (recentDuplicate) {
+      console.log("Found duplicate in recent prompts array, skipping");
+      return totalStats;
+    }
+    
+    // Record this prompt fingerprint to prevent future duplicates
+    recentPrompts[promptFingerprint] = now;
+    
+    // Clean up old entries
+    for (const key in recentPrompts) {
+      if (now - recentPrompts[key] > 600000) { // 10 minutes
+        delete recentPrompts[key];
+      }
+    }
+    
+    // Store updated fingerprints
+    await chrome.storage.local.set({ recentPrompts });
+    
+    // If sender tab info available, check for duplicates from page refresh
+    if (data.tabId) {
+      const tabId = data.tabId.toString();
+      const tabMetric = tabMetrics[tabId];
+      
+      // If we've seen metrics for this tab already
+      if (tabMetric && tabMetric.model === data.model && tabMetric.site === data.site) {
+        const timeSinceLastPrompt = Date.now() - tabMetric.lastPromptTime;
+        
+        // If this is a prompt within 5 seconds of the last one on the same tab/model/site
+        if (timeSinceLastPrompt < 5000) {
+          console.log("Likely page refresh - skipping prompt recording");
+          return totalStats;
+        }
+      }
+      
+      // Update tab metrics with this prompt timestamp
+      tabMetrics[tabId] = {
+        model: data.model,
+        site: data.site,
+        lastPromptTime: Date.now()
+      };
+      
+      await chrome.storage.local.set({ tabMetrics });
+    }
+    
+    // Continue with normal prompt storage...
     const promptWithTimestamp = {
       ...data,
       timestamp: new Date().toISOString(),
       inputTokens: data.inputTokenCount || 0,
       responseTokens: 0, // Will be updated when response comes in
-      // Ensure complete data is stored
       waterUsage: data.waterUsage || 0,
       carbonEmissions: data.carbonEmissions || 0,
       energyConsumption: data.energyConsumption || 0,
@@ -305,122 +447,122 @@ async function storePromptData(data) {
       site: data.site || 'unknown'
     };
     
-    // Update the total stats
-    totalStats.waterUsage += data.waterUsage || 0;
-    totalStats.carbonEmissions += data.carbonEmissions || 0;
-    totalStats.energyConsumption += data.energyConsumption || 0;
-    totalStats.cost += data.cost || 0;
-    totalStats.tokenCount += data.inputTokenCount || 0;
-    totalStats.promptCount += 1;
-    
     // Add to prompts list (limit to last 100)
     prompts.unshift(promptWithTimestamp);
-//     if (prompts.length > 100) {
-//         prompts.length = 100;
-//     }
+    if (prompts.length > 100) {
+      prompts.length = 100;
+    }
     
-    // Store updated data
+    // Store updated prompts
     await chrome.storage.local.set({
-      prompts: prompts,
-      totalStats: totalStats
+      prompts: prompts
     });
     
-    // Return the updated total stats
-    return totalStats;
+    // Recalculate totals based on all history entries
+    const totals = await recalculateTotalsFromHistory();
+    
+    return totals;
   } catch (error) {
     console.error("Error in storePromptData:", error);
     throw error;
   }
 }
 
-// Store response data in chrome.storage
+// Update the storeResponseData function similarly
 async function storeResponseData(data) {
   try {
     // Get existing data
-    const result = await chrome.storage.local.get(['prompts', 'totalStats']);
+    const result = await chrome.storage.local.get(['prompts', 'processedItems']);
     
     // Initialize if doesn't exist
-    const totalStats = result.totalStats || {
-      waterUsage: 0,
-      carbonEmissions: 0,
-      energyConsumption: 0,
-      cost: 0,
-      tokenCount: 0,
-      promptCount: 0
-    };
-    
     const prompts = result.prompts || [];
+    const processedItems = result.processedItems || {};
     
-    // Check for duplicates by site, timestamp, and token count
-    const isDuplicate = prompts.some(prompt => {
-      // Check if this is a duplicate response (same model, site, and very close timestamp)
-      const timeDiff = new Date() - new Date(prompt.timestamp);
-      const isSameSiteAndModel = prompt.model === data.model && prompt.site === data.site;
-      const isRecentPrompt = timeDiff < 30000; // Within 30 seconds
-      const hasSimilarTokens = Math.abs(prompt.responseTokens - (data.tokenCount || 0)) < 10;
-      
-      return isSameSiteAndModel && isRecentPrompt && hasSimilarTokens;
-    });
+    // Create a fingerprint of this response data
+    const fingerprint = `${data.model}-${data.site}-${data.tokenCount}-${data.inputTokenCount}`;
     
-    if (isDuplicate) {
-      console.log("Detected duplicate response, skipping storage");
-      // Return existing stats without adding duplicate
+    // Check if we've seen this item within the last hour
+    const now = Date.now();
+    const oneHour = 60 * 60 * 1000;
+    
+    if (processedItems[fingerprint] && (now - processedItems[fingerprint]) < oneHour) {
+      console.log("Detected duplicate response via fingerprint, skipping storage");
       return totalStats;
     }
     
-    // Update the total stats with response contribution
-    totalStats.waterUsage += data.waterUsage || 0;
-    totalStats.carbonEmissions += data.carbonEmissions || 0;
-    totalStats.energyConsumption += data.energyConsumption || 0;
-    totalStats.cost += data.cost || 0;
-    totalStats.tokenCount += data.tokenCount || 0;
+    // Record this item to prevent duplicates
+    processedItems[fingerprint] = now;
     
-    // If there's a recent prompt, try to match it with this response
-    let updatedPrompt = false;
+    // Clean up old processed items (older than 1 hour)
+    for (const key in processedItems) {
+      if (now - processedItems[key] > oneHour) {
+        delete processedItems[key];
+      }
+    }
+    
+    // Store updated processedItems
+    await chrome.storage.local.set({ processedItems });
+    
+    // Find the corresponding prompt and update it with response data
+    let foundMatchingPrompt = false;
     
     if (prompts.length > 0) {
-      // Look through recent prompts (last 3) to find a matching one
-      for (let i = 0; i < Math.min(3, prompts.length); i++) {
-        const prompt = prompts[i];
-        
-        // Check if this is the prompt corresponding to this response
-        const timeDiff = new Date() - new Date(prompt.timestamp);
-        const isSameSiteAndModel = prompt.model === data.model && prompt.site === data.site;
-        const isRecentPrompt = timeDiff < 60000; // Within 60 seconds
-        const needsResponseData = !prompt.responseTokens || prompt.responseTokens === 0;
-        
-        if (isSameSiteAndModel && isRecentPrompt && needsResponseData) {
-          console.log(`Matching response to prompt at index ${i}`);
+      // Go through the most recent prompts (first few in the array)
+      for (let i = 0; i < Math.min(5, prompts.length); i++) {
+        if (prompts[i].model === data.model && 
+            prompts[i].site === data.site && 
+            (!prompts[i].responseTokens || prompts[i].responseTokens === 0)) {
+            
+          console.log(`Found matching prompt at index ${i}, updating with response data`);
           
           // Update the prompt with response data
-          prompts[i] = {
-            ...prompt,
-            responseTokens: data.tokenCount || 0,
-            waterUsage: (prompt.waterUsage || 0) + (data.waterUsage || 0),
-            carbonEmissions: (prompt.carbonEmissions || 0) + (data.carbonEmissions || 0),
-            energyConsumption: (prompt.energyConsumption || 0) + (data.energyConsumption || 0),
-            cost: (prompt.cost || 0) + (data.cost || 0),
-            text: data.text || prompt.text
-          };
+          prompts[i].responseTokens = data.tokenCount || 0;
+          prompts[i].text = data.text || "";
+          prompts[i].waterUsage = (prompts[i].waterUsage || 0) + (data.waterUsage || 0);
+          prompts[i].carbonEmissions = (prompts[i].carbonEmissions || 0) + (data.carbonEmissions || 0);
+          prompts[i].energyConsumption = (prompts[i].energyConsumption || 0) + (data.energyConsumption || 0);
+          prompts[i].cost = (prompts[i].cost || 0) + (data.cost || 0);
           
-          updatedPrompt = true;
+          foundMatchingPrompt = true;
           break;
         }
       }
     }
     
-    if (!updatedPrompt) {
-      console.log("Could not find matching prompt for this response");
+    // If no matching prompt was found, add this as a new entry
+    if (!foundMatchingPrompt) {
+      console.log("No matching prompt found, creating new history entry");
+      
+      const responseEntry = {
+        ...data,
+        timestamp: new Date().toISOString(),
+        inputTokens: data.inputTokenCount || 0,
+        responseTokens: data.tokenCount || 0,
+        waterUsage: data.waterUsage || 0,
+        carbonEmissions: data.carbonEmissions || 0,
+        energyConsumption: data.energyConsumption || 0,
+        cost: data.cost || 0,
+        model: data.model || 'unknown',
+        site: data.site || 'unknown'
+      };
+      
+      // Add to prompts list
+      prompts.unshift(responseEntry);
+      
+      if (prompts.length > 100) {
+        prompts.length = 100;
+      }
     }
     
-    // Store updated data
+    // Store updated prompts
     await chrome.storage.local.set({
-      prompts: prompts,
-      totalStats: totalStats
+      prompts: prompts
     });
     
-    // Return the updated total stats
-    return totalStats;
+    // Recalculate totals based on all history entries
+    const totals = await recalculateTotalsFromHistory();
+    
+    return totals;
   } catch (error) {
     console.error("Error in storeResponseData:", error);
     throw error;
@@ -563,5 +705,118 @@ chrome.runtime.onInstalled.addListener(() => {
       });
       console.log("Initialized storage for AI Waste Watcher");
     }
+    
+    // Start reconciliation interval
+    startReconciliationInterval();
   });
 });
+
+// Add this function to recalculate totals based on history
+
+async function recalculateTotalsFromHistory() {
+  try {
+    // Get all prompts from storage
+    const result = await chrome.storage.local.get(['prompts']);
+    const prompts = result.prompts || [];
+    
+    // Initialize fresh totals
+    const calculatedTotals = {
+      waterUsage: 0,
+      carbonEmissions: 0,
+      energyConsumption: 0,
+      cost: 0,
+      tokenCount: 0,
+      promptCount: prompts.length
+    };
+    
+    // Sum up all values from the history
+    prompts.forEach(prompt => {
+      calculatedTotals.waterUsage += prompt.waterUsage || 0;
+      calculatedTotals.carbonEmissions += prompt.carbonEmissions || 0;
+      calculatedTotals.energyConsumption += prompt.energyConsumption || 0;
+      calculatedTotals.cost += prompt.cost || 0;
+      calculatedTotals.tokenCount += (prompt.inputTokens || 0) + (prompt.responseTokens || 0);
+    });
+    
+    // Update the storage with recalculated totals
+    await chrome.storage.local.set({
+      totalStats: calculatedTotals
+    });
+    
+    console.log("Recalculated totals from history:", calculatedTotals);
+    return calculatedTotals;
+  } catch (error) {
+    console.error("Error recalculating totals from history:", error);
+    throw error;
+  }
+}
+
+// Periodically reconcile totals with history
+function startReconciliationInterval() {
+  // Reconcile once on startup
+  recalculateTotalsFromHistory().catch(err => 
+    console.error("Error during startup reconciliation:", err)
+  );
+  
+  // Set up interval for regular reconciliation
+  const RECONCILE_INTERVAL = 5 * 60 * 1000; // 5 minutes
+  setInterval(() => {
+    recalculateTotalsFromHistory().catch(err => 
+      console.error("Error during scheduled reconciliation:", err)
+    );
+  }, RECONCILE_INTERVAL);
+}
+
+// Add this comprehensive reset function:
+async function performFullReset() {
+  try {
+    // Fresh zero stats object
+    const zeroStats = {
+      waterUsage: 0,
+      carbonEmissions: 0,
+      energyConsumption: 0,
+      cost: 0,
+      tokenCount: 0,
+      promptCount: 0
+    };
+    
+    // Reset ALL storage items related to stats
+    await chrome.storage.local.set({
+      totalStats: zeroStats,
+      prompts: [],                  // Clear history entirely
+      recentPrompts: {},            // Clear recent prompts tracking
+      processedItems: {},           // Clear response tracking
+      tabMetrics: {},               // Clear tab metrics
+      lastUpdated: Date.now()       // Set reset timestamp
+    });
+    
+    console.log("All storage data reset successfully");
+    return true;
+  } catch (error) {
+    console.error("Error during storage reset:", error);
+    throw error;
+  }
+}
+
+// Function to notify all tabs of reset
+async function notifyAllTabsOfReset() {
+  try {
+    const tabs = await chrome.tabs.query({});
+    
+    // Send reset confirmation to all tabs
+    const promises = tabs.map(tab => {
+      return chrome.tabs.sendMessage(tab.id, {
+        action: "completeStatsReset"
+      }).catch(() => {
+        // Ignore errors for tabs without our content script
+      });
+    });
+    
+    await Promise.allSettled(promises);
+    console.log("Reset notification sent to all tabs");
+    return true;
+  } catch (error) {
+    console.error("Error notifying tabs of reset:", error);
+    throw error;
+  }
+}

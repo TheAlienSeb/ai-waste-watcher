@@ -1,4 +1,3 @@
-
 import React, { useEffect, useState } from 'react';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -119,22 +118,25 @@ const Index = () => {
 
   const resetStats = async () => {
     try {
-      if (typeof chrome !== 'undefined' && chrome.storage) {
-        await chrome.storage.local.set({ 
-          totalStats: {
-            waterUsage: 0,
-            carbonEmissions: 0,
-            energyConsumption: 0,
-            cost: 0,
-            promptCount: 0
-          },
-          prompts: []
-        });
+      if (typeof chrome !== 'undefined' && chrome.runtime) {
+        // Use the background script's resetAllStats action instead of directly modifying storage
+        await chrome.runtime.sendMessage({ action: "resetAllStats" });
         
         toast({
           title: "Stats Reset",
           description: "Your AI usage data has been reset.",
         });
+        
+        // Force a refresh of our local state to display zeros
+        setStats({
+          waterUsage: 0,
+          carbonEmissions: 0,
+          energyConsumption: 0,
+          cost: 0,
+          promptCount: 0
+        });
+        setPrompts([]);
+        
       } else {
         // Reset local state for development
         setStats({

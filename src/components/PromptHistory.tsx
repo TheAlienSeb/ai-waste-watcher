@@ -12,6 +12,7 @@ type Prompt = {
   cost: number;
   tokenCount: number;
   inputTokenCount?: number;
+  inputTokens?: number;
   responseTokens?: number;
   model: string;
   site: string;
@@ -83,11 +84,67 @@ const PromptHistory = ({ prompts, formatNumber }: PromptHistoryProps) => {
       [index]: !prev[index]
     }));
   };
-  
+
+  // Normalize prompt data to ensure consistent types
+  const normalizePrompts = (rawPrompts: Prompt[]) => {
+    return rawPrompts.map(prompt => {
+      // Fix NaN and undefined issues with token counts
+      const inputTokens = typeof prompt.inputTokens === 'number' ? prompt.inputTokens : 
+                         (typeof prompt.inputTokenCount === 'number' ? prompt.inputTokenCount : 0);
+                         
+      const responseTokens = typeof prompt.responseTokens === 'number' ? prompt.responseTokens : 
+                             (typeof prompt.tokenCount === 'number' ? prompt.tokenCount : 0);
+      
+      return {
+        ...prompt,
+        // Convert all values to proper numbers
+        inputTokens: isNaN(inputTokens) ? 0 : inputTokens,
+        responseTokens: isNaN(responseTokens) ? 0 : responseTokens,
+        tokenCount: typeof prompt.tokenCount === 'number' ? prompt.tokenCount : 0,
+        waterUsage: typeof prompt.waterUsage === 'number' ? prompt.waterUsage : 0,
+        carbonEmissions: typeof prompt.carbonEmissions === 'number' ? prompt.carbonEmissions : 0,
+        energyConsumption: typeof prompt.energyConsumption === 'number' ? prompt.energyConsumption : 0,
+        cost: typeof prompt.cost === 'number' ? prompt.cost : 0,
+      };
+    });
+  };
+
+  // Deduplicate prompts that may have identical data
+  const deduplicatePrompts = (normalizedPrompts: Prompt[]) => {
+    const seen = new Set();
+    
+    return normalizedPrompts.filter(prompt => {
+      // Create a fingerprint for each prompt
+      const fingerprint = `${prompt.model}-${prompt.site}-${prompt.inputTokens}-${prompt.responseTokens}-${prompt.timestamp.substring(0, 16)}`;
+      
+      // If we've seen this fingerprint, it's a duplicate
+      if (seen.has(fingerprint)) {
+        return false;
+      }
+      
+      // Otherwise, add it to seen set and keep it
+      seen.add(fingerprint);
+      return true;
+    });
+  };
+
+  // Filter to only include prompts with response tokens
+  const filterValidPrompts = (prompts: Prompt[]) => {
+    return prompts.filter(prompt => {
+      const responseTokens = prompt.responseTokens || prompt.tokenCount || 0;
+      return responseTokens > 0; // Only show prompts with response tokens
+    });
+  };
+
+  // Update the filtering code
+  const normalizedPrompts = normalizePrompts(prompts);
+  const deduplicatedPrompts = deduplicatePrompts(normalizedPrompts);
+  const validPrompts = filterValidPrompts(deduplicatedPrompts);
+
   // Filter prompts by model
   const filteredPrompts = filter === "all" 
-    ? prompts 
-    : prompts.filter(prompt => prompt.model.includes(filter));
+    ? validPrompts 
+    : validPrompts.filter(prompt => prompt.model.includes(filter));
 
   return (
     <div className="space-y-3">
@@ -119,16 +176,17 @@ const PromptHistory = ({ prompts, formatNumber }: PromptHistoryProps) => {
         ) : (
           <div className="space-y-3">
             {filteredPrompts.map((prompt, index) => {
-              // Calculate if we have input tokens data
-              const hasInputData = !!(prompt.inputTokenCount);
-              const totalTokens = prompt.tokenCount || 0;
-              const inputTokens = prompt.inputTokenCount || 0;
+              // Generate a more unique key
+              const uniqueKey = `${prompt.timestamp}-${prompt.model}-${index}`;
+              
+              // Calculate token data
+              const inputTokens = prompt.inputTokens || prompt.inputTokenCount || 0;
               const responseTokens = prompt.responseTokens || prompt.tokenCount || 0;
               const isExpanded = expanded[index] || false;
               
               return (
                 <Card 
-                  key={index} 
+                  key={uniqueKey} 
                   className="p-3 bg-white/80 backdrop-blur-sm border-slate-100 shadow-sm"
                   onClick={() => toggleExpanded(index)}
                 >
@@ -146,23 +204,17 @@ const PromptHistory = ({ prompts, formatNumber }: PromptHistoryProps) => {
                   
                   <div className="flex items-center space-x-1 text-xs text-muted-foreground mb-3">
                     <MessageSquare className="h-3 w-3" />
-                    <div className="flex space-x-1">
-                      {hasInputData ? (
-                        <>
-                          <span className="flex items-center">
-                            <ArrowUp className="h-2 w-2 mr-0.5" />
-                            {inputTokens}
-                             tokens
-                          </span>
-                          <span className="flex items-center">
-                            <ArrowDown className="h-2 w-2 mr-0.5 text-blue-500" />
-                            {responseTokens}
-                             tokens
-                          </span>
-                        </>
-                      ) : (
-                        <span>{totalTokens} tokens</span>
-                      )}
+                    <div className="flex items-center gap-2">
+                      <span className="flex items-center">
+                        <ArrowUp className="h-2 w-2 mr-0.5 text-zinc-500" />
+                        {inputTokens}
+                        <span className="text-muted-foreground/70">tokens</span>
+                      </span>
+                      <span className="flex items-center">
+                        <ArrowDown className="h-2 w-2 mr-0.5 text-blue-500" />
+                        {responseTokens}
+                        <span className="text-muted-foreground/70">tokens</span>
+                      </span>
                     </div>
                   </div>
                   

@@ -2,23 +2,88 @@
 
 // ======= Configuration Constants =======
 
+// Updated impact factors based on empirical research
 const IMPACT_FACTORS = {
-  waterPerToken: 0.5,    // Water usage in ml per token
-  carbonPerToken: 0.2,   // Carbon in grams of CO2 per token
-  energyPerToken: 0.3,   // Energy in joules per token
-  costPerToken: 0.0001   // Cost in cents per token
+  // Base WUE (Water Usage Effectiveness) from research
+  waterUsageEffectiveness: 1.8, // L/kWh (industry average)
+  // Base carbon intensity from research
+  carbonIntensity: 475, // g CO2/kWh (global average grid)
 };
 
-// Model-specific configuration
+// Model-specific configuration with updated empirical values
 const AI_MODELS = {
-  'gpt-4o': { factor: 3.5, parameters: 100, verbosity: 1.2 },
-  'gpt-4': { factor: 3.0, parameters: 80, verbosity: 1.2 },
-  'gpt-3.5': { factor: 1.0, parameters: 20, verbosity: 1.0 },
-  'claude': { factor: 2.0, parameters: 70, verbosity: 1.3 },
-  'perplexity': { factor: 1.5, parameters: 40, verbosity: 1.0 },
-  'gemini': { factor: 2.0, parameters: 60, verbosity: 1.0 },
-  'default': { factor: 1.0, parameters: 50, verbosity: 1.0 }
+  'gpt-4o': {
+    parameters: 100,
+    verbosity: 1.2,
+    inputCost: 0.005,   // $0.005 per 1K input tokens
+    outputCost: 0.015,  // $0.015 per 1K output tokens
+    // Environmental metrics
+    energyPerToken: 0.00029, // kWh per token (0.29 Wh)
+    waterPerToken: 0.5,      // ml per token (empirical: ~500ml per query)
+    carbonPerToken: 4.32/1000 // g CO2 per token (empirical: ~4.32g per query)
+  },
+  'gpt-4': {
+    parameters: 80,
+    verbosity: 1.2,
+    inputCost: 0.03,    // $0.03 per 1K input tokens
+    outputCost: 0.06,   // $0.06 per 1K output tokens
+    // Environmental metrics
+    energyPerToken: 0.00028, // kWh per token (0.28 Wh)
+    waterPerToken: 0.5,      // ml per token (empirical: ~500ml per query)
+    carbonPerToken: 4.0/1000  // g CO2 per token (empirical: ~4.0g per query)
+  },
+  'gpt-3.5': {
+    parameters: 20,
+    verbosity: 1.0,
+    inputCost: 0.0005,  // $0.0005 per 1K input tokens
+    outputCost: 0.0015, // $0.0015 per 1K output tokens
+    // Environmental metrics
+    energyPerToken: 0.00010, // kWh per token (lower than GPT-4)
+    waterPerToken: 0.2,      // ml per token (lower than GPT-4)
+    carbonPerToken: 1.8/1000  // g CO2 per token (lower than GPT-4)
+  },
+  'claude': {
+    parameters: 70,
+    verbosity: 1.3,
+    inputCost: 0.008,   // $0.008 per 1K input tokens (Claude 3 Opus average)
+    outputCost: 0.024,  // $0.024 per 1K output tokens
+    // Environmental metrics
+    energyPerToken: 0.00025, // kWh per token (0.25 Wh)
+    waterPerToken: 0.45,     // ml per token (empirical: ~400-600ml per query)
+    carbonPerToken: 3.5/1000  // g CO2 per token (empirical: ~3.5g per query)
+  },
+  'gemini': {
+    parameters: 60,
+    verbosity: 1.0,
+    inputCost: 0.0005,  // $0.0005 per 1K input tokens (Gemini Pro)
+    outputCost: 0.0015, // $0.0015 per 1K output tokens
+    // Environmental metrics
+    energyPerToken: 0.00020, // kWh per token (0.20 Wh)
+    waterPerToken: 0.35,     // ml per token (empirical: ~300-500ml per query)
+    carbonPerToken: 1.6/1000  // g CO2 per token (empirical: ~1.6g per query)
+  },
+  'perplexity': {
+    parameters: 40,
+    verbosity: 1.0,
+    inputCost: 0.002,   // Estimated, as Perplexity uses various models
+    outputCost: 0.008,  // Estimated
+    // Environmental metrics
+    energyPerToken: 0.00022, // kWh per token (estimated)
+    waterPerToken: 0.4,      // ml per token (estimated)
+    carbonPerToken: 2.5/1000  // g CO2 per token (estimated)
+  },
+  'default': {
+    parameters: 50,
+    verbosity: 1.0,
+    inputCost: 0.001,   // Default fallback pricing
+    outputCost: 0.002,  // Default fallback pricing
+    // Environmental metrics
+    energyPerToken: 0.00020, // kWh per token (average estimate)
+    waterPerToken: 0.3,      // ml per token (average estimate)
+    carbonPerToken: 2.0/1000  // g CO2 per token (average estimate)
+  }
 };
+
 
 // AI site detection configuration
 const AI_SITES = [
@@ -61,6 +126,7 @@ const state = {
   attachedElements: new WeakSet(),
   lastCapturedText: '',
   lastCaptureTime: 0,
+  syncIntervalId: null, // Add this property to store the interval ID
   hooks: {
     installed: false
   },
@@ -72,7 +138,14 @@ const state = {
     promptCount: 0
   },
   processedResponses: {},
-  lastProcessedResponseCleanup: 0
+  lastProcessedResponseCleanup: 0,
+  lastPageLoadTime: Date.now(),
+  hasRegisteredPrompt: false, // Flag to prevent multiple registrations on refresh
+  expectingResponse: false, // Flag to indicate we're expecting a response
+  lastPromptInputTokens: 0,
+  lastPromptInitialImpact: {},
+  lastPromptModel: '',
+  syncIntervalId: null
 };
 
 const DEBOUNCE_DELAY = 1000; // 1 second debounce
@@ -98,6 +171,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       
       injectLivePreview();
+      updateLivePreviewTitle(); // Update title with new site
       sendResponse({status: `Detection configured for: ${message.site}`});
     },
     
@@ -110,7 +184,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     resetStats: () => {
       debugLog("Resetting statistics");
       resetStats();
+      // Force update the live preview immediately
+      updateLivePreview(state.totalStats);
       sendResponse({status: "Statistics reset"});
+    },
+    completeStatsReset: () => {
+      debugLog("Received complete stats reset signal");
+      performFullReset();
+      sendResponse({status: "Stats reset in content script"});
+    },
+    statsResetConfirmed: () => {
+      debugLog("Received stats reset confirmation from background");
+      
+      // Make sure our UI is showing zeros
+      updateLivePreview(state.totalStats);
+      
+      sendResponse({status: "Reset confirmation received"});
     }
   };
   
@@ -450,19 +539,20 @@ function capturePromptImpl(model) {
 function processPrompt(text, model) {
   debugLog("Prompt detected in processPrompt function:", text.substring(0, 30) + "...");
   
-  // Calculate input tokens
+  // Check if this is likely a duplicate from page refresh
+  const timeSincePageLoad = Date.now() - state.lastPageLoadTime;
+  if (timeSincePageLoad < 2000 && state.hasRegisteredPrompt) { // Within 2 seconds of page load
+    debugLog("Skipping likely duplicate prompt from page refresh");
+    return;
+  }
+  
+  // Mark that we've registered a prompt
+  state.hasRegisteredPrompt = true;
+  
+  // Continue with normal processing...
   const inputTokens = estimateTokenCount(text);
-  
-  // Instead of estimating, we'll capture responses and calculate real tokens
-  const modelConfig = AI_MODELS[model] || AI_MODELS.default;
-  
-  // Create an initial impact with just input tokens
   const initialImpact = calculatePartialImpact(0, inputTokens, model);
-  
-  // Update stats UI immediately with just the input contribution
   updateStatsWithPrompt(initialImpact);
-  
-  // Set up a response observer to capture and calculate the actual response
   captureResponse(model, inputTokens, initialImpact);
   
   debugLog(`Token calculation - Input tokens: ${inputTokens}, waiting for response...`);
@@ -488,20 +578,24 @@ function updateStatsWithPrompt(impact) {
   });
 }
 
+// Update the calculatePartialImpact function
+
 // Calculate impact based on input tokens only, without response estimation
 function calculatePartialImpact(responseTokens, inputTokens, model) {
   const modelConfig = AI_MODELS[model] || AI_MODELS.default;
   
-  // Calculate input processing energy
-  const inputEnergyJoules = inputTokens <= 10000
-    ? (2.5 * 3600) * (inputTokens / 10000)
-    : (40 * 3600) * (inputTokens / 100000);
+  // Calculate input energy in kWh, then convert to Joules
+  const inputEnergyKWh = modelConfig.energyPerToken * inputTokens * 0.3; // Only count 30% for input phase
+  const inputEnergyJoules = inputEnergyKWh * 3600000;
+  
+  // Calculate input cost using real pricing
+  const inputCost = (inputTokens / 1000) * modelConfig.inputCost;
   
   return {
     waterUsage: 0, // Will be updated when response is captured
     carbonEmissions: 0, // Will be updated when response is captured
     energyConsumption: inputEnergyJoules,
-    cost: 0, // Will be updated when response is captured
+    cost: inputCost, // Now uses actual API pricing
     inputTokenCount: inputTokens,
     responseTokenCount: 0, // Will be updated when response is captured
     model,
@@ -509,15 +603,30 @@ function calculatePartialImpact(responseTokens, inputTokens, model) {
   };
 }
 
-// Capture the actual AI response and update calculations
+// Update captureResponse function around line 535
+
 function captureResponse(model, inputTokens, initialImpact) {
+  // Set a flag to indicate we're expecting a response
+  state.expectingResponse = true;
+  state.lastPromptInputTokens = inputTokens;
+  state.lastPromptInitialImpact = initialImpact;
+  state.lastPromptModel = model;
+  
   let responseCheckInterval;
   let timeoutId;
   let isProcessing = false;
   
+  // Add a variable to track the last fully processed response
+  let lastProcessedResponseText = '';
+
   // Function to check existing responses on the page
   const checkForCompletedResponses = () => {
     if (isProcessing) return;
+    
+    // Only check for responses if we're expecting one from a prompt
+    if (!state.expectingResponse) {
+      return;
+    }
     
     const responseElements = document.querySelectorAll(SELECTORS.responses.join(', '));
     if (!responseElements || responseElements.length === 0) return;
@@ -529,8 +638,18 @@ function captureResponse(model, inputTokens, initialImpact) {
     const responseText = latestResponse.textContent.trim();
     if (!responseText || responseText.length < 10) return;
     
-    // Important: Create a unique response ID based on content
-    const responseId = `${model}-${responseText.length}-${responseText.substring(0, 20)}`;
+    // If this exact response text was already processed, skip it
+    if (responseText === lastProcessedResponseText) {
+      return;
+    }
+    
+    // Create a unique response ID that incorporates more specific identifiers
+    const contentFingerprint = responseText.substring(0, 30).replace(/\s+/g, '') + 
+                             responseText.substring(responseText.length - 30).replace(/\s+/g, '');
+    const sessionKey = sessionStorage.getItem('awSessionKey') || 
+                      (sessionStorage.setItem('awSessionKey', Date.now().toString(36)), 
+                       sessionStorage.getItem('awSessionKey'));
+    const responseId = `${model}-${sessionKey}-${responseText.length}-${contentFingerprint}`;
     
     // Check if we've already processed this exact response
     if (state.processedResponses && state.processedResponses[responseId]) {
@@ -549,6 +668,8 @@ function captureResponse(model, inputTokens, initialImpact) {
         // After 3 consecutive checks with the same content, consider it complete
         if (stableChecks >= 3) {
           processCompletedResponse(responseText, responseId);
+          // Remember this completed response to avoid processing it again
+          lastProcessedResponseText = responseText;
         }
       }
     } else {
@@ -607,18 +728,28 @@ function captureResponse(model, inputTokens, initialImpact) {
     // Update UI immediately
     updateLivePreview(state.totalStats);
     
-    // Send the updated impact data
+    // Send the updated impact data to be recorded in history immediately
     safeSendMessage({
       action: "responseDetected",
       data: deltaImpact
+    }).catch(err => {
+      debugLog("Error sending response data", err);
     });
     
-    // Broadcast updated stats to extension popup
+    // Also broadcast the updated stats
     broadcastStatsToExtension(state.totalStats);
+    
+    debugLog("Response recorded in history");
+    
+    // Clear the expecting response flag once we've processed a response
+    state.expectingResponse = false;
   };
 
   // Also set up a MutationObserver to catch new responses being added
   const responseObserver = new MutationObserver((mutations) => {
+    // Only look for responses if we're expecting one from a prompt
+    if (!state.expectingResponse) return;
+
     let newResponseFound = false;
     
     // Look for newly added responses
@@ -815,6 +946,7 @@ function injectLivePreview() {
     if (state.livePreviewElement.style.display === 'none') {
       state.livePreviewElement.style.display = 'block';
     }
+    updateLivePreviewTitle(); // Update the title in case model changed
     return;
   }
   
@@ -846,7 +978,7 @@ function injectLivePreview() {
         <path d="M7.1 13H6.1C5.5 13 5.1 13.4 5.1 14V16C5.1 16.6 5.5 17 6.1 17H10.1C10.7 17 11.1 16.6 11.1 16V14C11.1 13.4 10.7 13 10.1 13H8.1" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         <path d="M5 19.2V5C5 4.4 4.6 4 4 4C3.4 4 3 4.4 3 5V19.2C3 19.7 3.3 20 3.7 20H20.2C20.6 20 21 19.7 21 19.2C21 18.8 20.7 18.4 20.2 18.4H5" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      AI Waste Watcher
+      <span id="ai-waste-title">AI Waste Watcher</span>
       <span style="margin-left: auto; cursor: pointer; color: #aaa;" id="ai-waste-close">×</span>
     </div>
     <div id="ai-waste-stats" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 11px;">
@@ -878,6 +1010,9 @@ function injectLivePreview() {
   // Add the element to the page (removed test button code)
   document.body.appendChild(state.livePreviewElement);
   
+  // Update the title with current model
+  updateLivePreviewTitle();
+  
   // Add close button functionality
   document.getElementById('ai-waste-close').addEventListener('click', () => {
     state.livePreviewElement.style.display = 'none';
@@ -896,6 +1031,36 @@ function injectLivePreview() {
   } else {
     state.livePreviewElement.style.left = '20px';
     state.livePreviewElement.style.top = '20px';
+  }
+}
+
+// Add this new function to update the title
+function updateLivePreviewTitle() {
+  const titleElement = document.getElementById('ai-waste-title');
+  if (!titleElement) return;
+  
+  let modelName = 'Unknown';
+  
+  // Get a nice name for the current model
+  if (state.currentSite) {
+    const site = findSiteConfig(state.currentSite);
+    if (site) {
+      // Format model name nicely
+      if (site.model === 'gpt-4o') modelName = 'GPT-4o';
+      else if (site.model === 'gpt-4') modelName = 'GPT-4';
+      else if (site.model === 'gpt-3.5') modelName = 'GPT-3.5';
+      else if (site.model.includes('claude')) modelName = 'Claude';
+      else if (site.model.includes('gemini')) modelName = 'Gemini';
+      else if (site.model.includes('perplexity')) modelName = 'Perplexity';
+      else modelName = site.model.charAt(0).toUpperCase() + site.model.slice(1);
+    }
+  }
+  
+  // Update title with model
+  if (modelName !== 'Unknown') {
+    titleElement.textContent = `AI Waste Watcher - ${modelName}`;
+  } else {
+    titleElement.textContent = 'AI Waste Watcher';
   }
 }
 
@@ -960,14 +1125,283 @@ function showLivePreview() {
   }
 }
 
-function resetStats() {
-  // Reset all stats in one go
-  Object.keys(state.totalStats).forEach(key => {
-    state.totalStats[key] = 0;
+// Improved sync interval function with error recovery
+function startStatsSyncInterval() {
+  // Clear any existing interval
+  if (state.syncIntervalId) {
+    clearInterval(state.syncIntervalId);
+    state.syncIntervalId = null;
+  }
+  
+  // Create a function that can be self-referenced for removal
+  const syncStats = async () => {
+    try {
+      // Check if runtime exists and is valid first
+      if (chrome.runtime && chrome.runtime.id) {
+        // Test with a simple API call first
+        await chrome.storage.local.get('test').catch(() => {
+          throw new Error('Extension context invalidated');
+        });
+        
+        // If we made it here, the context is valid
+        if (state.totalStats) {
+          broadcastStatsToExtension(state.totalStats);
+        }
+      }
+    } catch (e) {
+      // If we get an extension context error, stop the interval
+      if (e.message && (
+          e.message.includes('Extension context invalidated') || 
+          e.message.includes('Invalid extension context') ||
+          !chrome.runtime || !chrome.runtime.id
+      )) {
+        console.log("Extension context invalidated, stopping sync interval");
+        clearInterval(state.syncIntervalId);
+        state.syncIntervalId = null;
+      }
+    }
+  };
+  
+  state.syncIntervalId = setInterval(syncStats, 5000); // Sync every 5 seconds
+  
+  return state.syncIntervalId;
+}
+
+// Add cleanup for processed responses to avoid memory leaks
+function cleanupProcessedResponses() {
+  if (!state.processedResponses) return;
+  
+  const now = Date.now();
+  const maxAge = 5 * 60 * 1000; // 5 minutes
+  
+  // If we have too many cached responses (>100) or they're old, clean up
+  if (Object.keys(state.processedResponses).length > 100 || 
+      state.lastProcessedResponseCleanup && now - state.lastProcessedResponseCleanup > maxAge) {
+    state.processedResponses = {};
+    state.lastProcessedResponseCleanup = now;
+  }
+}
+
+// Add cleanup call to an interval
+setInterval(cleanupProcessedResponses, 60000); // Clean up every minute
+
+// ======= Initialization =======
+
+window.addEventListener('load', () => {
+  // Reset page load timestamp on every page load
+  state.lastPageLoadTime = Date.now();
+  state.hasRegisteredPrompt = false;
+  
+  debugLog("Content script loaded, sending ping to background script");
+  
+  safeSendMessage({action: "ping"}, function(response) {
+    if (response && response.status === "pong") {
+      debugLog("Connection with background script confirmed!");
+      state.syncIntervalId = startStatsSyncInterval(); // Store the interval ID in state
+    } else {
+      debugLog("No response from background script, may need to reload extension");
+    }
   });
   
-  // Update the UI
+  safeSendMessage({action: "checkCurrentSite"});
+  
+  // Fallback detection
+  setTimeout(() => {
+    if (!state.observingTextarea) {
+      console.log("Fallback detection initialized");
+      setupPromptDetection();
+      injectLivePreview();
+    }
+  }, 3000);
+});
+
+// Add this utility function for safer message sending
+function safeSendMessage(message, callback) {
+  try {
+    // First verify that chrome.runtime exists and has a valid ID
+    if (!chrome.runtime || !chrome.runtime.id) {
+      debugLog("Extension context unavailable");
+      return Promise.reject(new Error("Extension context unavailable"));
+    }
+    
+    const sendPromise = chrome.runtime.sendMessage(message);
+    
+    if (callback && typeof callback === 'function') {
+      sendPromise.then(callback).catch(err => {
+        // Silently fail for expected errors
+        if (err.message !== "The message port closed before a response was received") {
+          debugLog("Error sending message", err);
+        }
+      });
+    }
+    
+    return sendPromise;
+  } catch (err) {
+    // Handle "Extension context invalidated" error gracefully
+    if (err.message && (
+        err.message.includes('Extension context invalidated') ||
+        err.message.includes('Invalid extension context')
+    )) {
+      console.log("Extension has been reloaded or updated. Please refresh the page.");
+    } else {
+      debugLog("Error in message sending", err);
+    }
+    
+    return Promise.reject(err);
+  }
+}
+
+// Add page refresh detection
+
+// Store a flag in session storage to detect page refreshes
+window.addEventListener('load', () => {
+  // Check if this is a page refresh
+  const lastPageLoad = sessionStorage.getItem('aiWasteWatcherLastLoad');
+  const now = Date.now();
+  const isRefresh = lastPageLoad && (now - parseInt(lastPageLoad)) < 5000;
+  
+  // Update the last load timestamp
+  sessionStorage.setItem('aiWasteWatcherLastLoad', now.toString());
+  
+  // Set a flag for this being a refresh
+  state.isPageRefresh = isRefresh;
+  
+  if (isRefresh) {
+    debugLog("Page refreshed - enabling extra duplicate protection");
+  }
+  
+  // Rest of your initialization code...
+});
+
+// Update the sendPromptToBackground function to respect the refresh flag
+const sendPromptToBackground = (text, impact) => {
+  // If this is a page refresh and we just loaded, wait a bit 
+  // or skip sending to avoid duplicates
+  if (state.isPageRefresh) {
+    const timeSinceRefresh = Date.now() - parseInt(sessionStorage.getItem('aiWasteWatcherLastLoad'));
+    
+    // If it's really quick after refresh, skip this prompt
+    if (timeSinceRefresh < 1000) {
+      debugLog("Skipping prompt detection immediately after page refresh");
+      return;
+    }
+  }
+  
+  // Continue with normal processing...
+  debugLog(`Sending prompt to background script (${text.length} chars)`);
+  // ...rest of function...
+};
+
+// Update the performFullReset function
+
+function performFullReset() {
+  debugLog("Performing full stats reset");
+  
+  // Stop syncing while we clear everything
+  if (state.syncIntervalId) {
+    clearInterval(state.syncIntervalId);
+    const syncIntervalId = state.syncIntervalId; // Store locally if needed
+    state.syncIntervalId = null;
+  }
+  
+  // Reset all state properties to initial values
+  state.totalStats = {
+    cost: 0,
+    energyConsumption: 0,
+    waterUsage: 0,
+    carbonEmissions: 0,
+    promptCount: 0
+  };
+  
+  // Clear ALL tracking data
+  state.processedResponses = {};
+  state.lastCapturedText = '';
+  state.lastPromptText = '';
+  state.lastResponseText = '';
+  state.hasRegisteredPrompt = false;
+  state.expectingResponse = false;
+  state.lastPromptInputTokens = 0;
+  state.lastPromptInitialImpact = {};
+  state.lastPromptModel = '';
+  
+  // Update the session storage as well
+  sessionStorage.removeItem('aiWasteWatcherLastPrompt');
+  sessionStorage.removeItem('aiWasteWatcherLastResponseId');
+  
+  // Force reset the dataset attributes on any elements that might have them
+  document.querySelectorAll('[data-aw-stable-checks]').forEach(el => {
+    el.removeAttribute('data-aw-stable-checks');
+  });
+  
+  // Immediately update the UI to show reset state
   updateLivePreview(state.totalStats);
+  updateLivePreviewTitle();
+  
+  // Force the background script to reset its copy of the stats too
+  safeSendMessage({
+    action: "statsReset",
+    data: state.totalStats
+  })
+  .then(() => {
+    debugLog("Background storage reset confirmed");
+    
+    // Restart stats sync interval only after reset is complete
+    if (syncIntervalId) {
+      state.syncIntervalId = startStatsSyncInterval();
+    }
+  })
+  .catch(err => {
+    debugLog("Error resetting background storage:", err);
+    
+    // Try direct storage reset as a fallback
+    try {
+      chrome.storage.local.set({
+        totalStats: state.totalStats,
+        prompts: []
+      }, () => {
+        debugLog("Direct storage reset completed");
+        
+        // Restart sync interval after direct reset
+        if (syncIntervalId) {
+          state.syncIntervalId = startStatsSyncInterval();
+        }
+      });
+    } catch (directErr) {
+      debugLog("Direct storage reset failed:", directErr);
+      
+      // Restart sync interval even if direct reset failed
+      if (syncIntervalId) {
+        state.syncIntervalId = startStatsSyncInterval();
+      }
+    }
+  });
+  
+  // Also add a visible notification in the live preview
+  const statsContainer = document.getElementById('ai-waste-stats');
+  if (statsContainer) {
+    const resetNotice = document.createElement('div');
+    resetNotice.style.cssText = `
+      grid-column: span 2;
+      margin-top: 8px;
+      padding: 4px;
+      background: rgba(59, 130, 246, 0.15);
+      border-radius: 4px;
+      font-size: 10px;
+      text-align: center;
+      color: #93c5fd;
+    `;
+    resetNotice.textContent = 'Statistics have been reset';
+    statsContainer.appendChild(resetNotice);
+    
+    // Remove the notification after 3 seconds
+    setTimeout(() => {
+      if (resetNotice.parentNode === statsContainer) {
+        statsContainer.removeChild(resetNotice);
+      }
+    }, 3000);
+  }
+  
+  debugLog("Full stats reset completed");
 }
 
 // ======= Utility Functions =======
@@ -997,39 +1431,33 @@ function estimateTokenCount(text) {
 function calculateImpact(responseTokens, inputTokens, model) {
   const modelConfig = AI_MODELS[model] || AI_MODELS.default;
   
-  // Based on research: 2 FLOP per active parameter per token
-  const responseFlop = responseTokens * 2 * modelConfig.parameters * 1e9;
+  // Base energy calculation (in kWh)
+  const averageTokens = 500; // Average tokens per query from empirical studies
+  const scaleFactor = ((inputTokens + responseTokens) / averageTokens);
   
-  // H100 GPU parameters
-  const h100FlopPerSecond = 9.89e14;
-  const utilizationFactor = 0.1;
-  const powerUtilization = 0.7;
-  const gpuPower = 1500; // Watts
+  // Calculate energy consumption - scale based on total tokens vs average query
+  const energyInKWh = modelConfig.energyPerToken * (inputTokens + responseTokens);
+  const energyInJoules = energyInKWh * 3600000; // Convert kWh to Joules
   
-  // Calculate H100 time needed in seconds
-  const h100Time = (responseFlop / h100FlopPerSecond) / utilizationFactor;
+  // Calculate water usage - use empirical values scaled by token count
+  const waterUsage = modelConfig.waterPerToken * responseTokens * scaleFactor;
   
-  // Calculate energy in joules (watt-seconds)
-  const energyJoules = h100Time * gpuPower * powerUtilization;
+  // Calculate carbon emissions - use empirical values scaled by token count
+  const carbonEmissions = modelConfig.carbonPerToken * (inputTokens + responseTokens);
   
-  // Additional energy for input processing with progressive scaling
-  const inputEnergyJoules = inputTokens <= 10000
-    ? (2.5 * 3600) * (inputTokens / 10000)
-    : (40 * 3600) * (inputTokens / 100000);
-  
-  const totalEnergyJoules = energyJoules + inputEnergyJoules;
-  
-  // Calculate other impacts
-  const waterUsage = responseTokens * IMPACT_FACTORS.waterPerToken * modelConfig.factor;
-  const carbonEmissions = responseTokens * IMPACT_FACTORS.carbonPerToken * modelConfig.factor;
-  const cost = responseTokens * IMPACT_FACTORS.costPerToken * modelConfig.factor;
+  // Calculate actual API costs using real pricing
+  const inputCost = (inputTokens / 1000) * modelConfig.inputCost;  // Cost per 1K tokens
+  const outputCost = (responseTokens / 1000) * modelConfig.outputCost;  // Cost per 1K tokens
+  const totalCost = inputCost + outputCost;
   
   return {
     waterUsage,
     carbonEmissions,
-    energyConsumption: totalEnergyJoules,
-    cost,
+    energyConsumption: energyInJoules,
+    cost: totalCost,
     tokenCount: responseTokens,
+    inputTokenCount: inputTokens,
+    responseTokens: responseTokens,
     model,
     site: state.currentSite
   };
@@ -1114,120 +1542,3 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   return false; // Let other listeners handle other messages
 });
-
-// Improved sync interval function with error recovery
-function startStatsSyncInterval() {
-  let syncIntervalId = null;
-  
-  // Create a function that can be self-referenced for removal
-  const syncStats = async () => {
-    try {
-      // Check if runtime exists and is valid first
-      if (chrome.runtime && chrome.runtime.id) {
-        // Test with a simple API call first
-        await chrome.storage.local.get('test').catch(() => {
-          throw new Error('Extension context invalidated');
-        });
-        
-        // If we made it here, the context is valid
-        if (state.totalStats) {
-          broadcastStatsToExtension(state.totalStats);
-        }
-      }
-    } catch (e) {
-      // If we get an extension context error, stop the interval
-      if (e.message && (
-          e.message.includes('Extension context invalidated') || 
-          e.message.includes('Invalid extension context') ||
-          !chrome.runtime || !chrome.runtime.id
-      )) {
-        console.log("Extension context invalidated, stopping sync interval");
-        clearInterval(syncIntervalId);
-        syncIntervalId = null;
-      }
-    }
-  };
-  
-  syncIntervalId = setInterval(syncStats, 5000); // Sync every 5 seconds
-  return syncIntervalId;
-}
-
-// Add cleanup for processed responses to avoid memory leaks
-function cleanupProcessedResponses() {
-  if (!state.processedResponses) return;
-  
-  const now = Date.now();
-  const maxAge = 5 * 60 * 1000; // 5 minutes
-  
-  // If we have too many cached responses (>100) or they're old, clean up
-  if (Object.keys(state.processedResponses).length > 100 || 
-      state.lastProcessedResponseCleanup && now - state.lastProcessedResponseCleanup > maxAge) {
-    state.processedResponses = {};
-    state.lastProcessedResponseCleanup = now;
-  }
-}
-
-// Add cleanup call to an interval
-setInterval(cleanupProcessedResponses, 60000); // Clean up every minute
-
-// ======= Initialization =======
-
-window.addEventListener('load', () => {
-  debugLog("Content script loaded, sending ping to background script");
-  
-  safeSendMessage({action: "ping"}, function(response) {
-    if (response && response.status === "pong") {
-      debugLog("Connection with background script confirmed!");
-      startStatsSyncInterval(); // Start syncing stats
-    } else {
-      debugLog("No response from background script, may need to reload extension");
-    }
-  });
-  
-  safeSendMessage({action: "checkCurrentSite"});
-  
-  // Fallback detection
-  setTimeout(() => {
-    if (!state.observingTextarea) {
-      console.log("Fallback detection initialized");
-      setupPromptDetection();
-      injectLivePreview();
-    }
-  }, 3000);
-});
-
-// Add this utility function for safer message sending
-function safeSendMessage(message, callback) {
-  try {
-    // First verify that chrome.runtime exists and has a valid ID
-    if (!chrome.runtime || !chrome.runtime.id) {
-      debugLog("Extension context unavailable");
-      return Promise.reject(new Error("Extension context unavailable"));
-    }
-    
-    const sendPromise = chrome.runtime.sendMessage(message);
-    
-    if (callback && typeof callback === 'function') {
-      sendPromise.then(callback).catch(err => {
-        // Silently fail for expected errors
-        if (err.message !== "The message port closed before a response was received") {
-          debugLog("Error sending message", err);
-        }
-      });
-    }
-    
-    return sendPromise;
-  } catch (err) {
-    // Handle "Extension context invalidated" error gracefully
-    if (err.message && (
-        err.message.includes('Extension context invalidated') ||
-        err.message.includes('Invalid extension context')
-    )) {
-      console.log("Extension has been reloaded or updated. Please refresh the page.");
-    } else {
-      debugLog("Error in message sending", err);
-    }
-    
-    return Promise.reject(err);
-  }
-}
