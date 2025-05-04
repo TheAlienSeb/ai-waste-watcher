@@ -173,7 +173,7 @@ const Index = () => {
     <div className="w-[350px] min-h-[500px] p-4 bg-gradient-to-br from-green-50 to-blue-50">
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-xl font-bold text-green-800 flex items-center gap-2">
-          <CloudLightning className="h-5 w-5" /> AI Waste Watcher
+          <CloudLightning className="h-5 w-5" /> wAIsted
         </h1>
         <div className="text-xs text-green-700 font-medium">
           {stats.promptCount} prompts tracked

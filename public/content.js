@@ -989,7 +989,7 @@ function injectLivePreview() {
         <path d="M7.1 13H6.1C5.5 13 5.1 13.4 5.1 14V16C5.1 16.6 5.5 17 6.1 17H10.1C10.7 17 11.1 16.6 11.1 16V14C11.1 13.4 10.7 13 10.1 13H8.1" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         <path d="M5 19.2V5C5 4.4 4.6 4 4 4C3.4 4 3 4.4 3 5V19.2C3 19.7 3.3 20 3.7 20H20.2C20.6 20 21 19.7 21 19.2C21 18.8 20.7 18.4 20.2 18.4H5" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <span id="ai-waste-title">AI Waste Watcher</span>
+      <span id="ai-waste-title">wAIsted</span>
       <span style="margin-left: auto; cursor: pointer; color: #aaa;" id="ai-waste-close">×</span>
     </div>
     <div id="ai-waste-stats" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 11px;">
@@ -1069,9 +1069,9 @@ function updateLivePreviewTitle() {
   
   // Update title with model
   if (modelName !== 'Unknown') {
-    titleElement.textContent = `AI Waste Watcher - ${modelName}`;
+    titleElement.textContent = `wAIsted - ${modelName}`;
   } else {
-    titleElement.textContent = 'AI Waste Watcher';
+    titleElement.textContent = 'wAIsted';
   }
 }
 
@@ -1477,9 +1477,9 @@ function calculateImpact(responseTokens, inputTokens, model) {
 function debugLog(message, data = null) {
   const timestamp = new Date().toISOString().substring(11, 19);
   if (data) {
-    console.log(`[AI WASTE WATCHER ${timestamp}]`, message, data);
+    console.log(`[wAIsted ${timestamp}]`, message, data);
   } else {
-    console.log(`[AI WASTE WATCHER ${timestamp}]`, message);
+    console.log(`[wAIsted ${timestamp}]`, message);
   }
   
   // Also update debug panel if it exists

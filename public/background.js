@@ -713,7 +713,7 @@ chrome.runtime.onInstalled.addListener(() => {
           promptCount: 0
         }
       });
-      console.log("Initialized storage for AI Waste Watcher");
+      console.log("Initialized storage for wAIsted");
     }
     
     // Start reconciliation interval
