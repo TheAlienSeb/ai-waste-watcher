@@ -288,7 +288,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true; // Keep the message channel open
     },
 
-    // Add this to your message handlers object in the chrome.runtime.onMessage.addListener function
+    // Fix the statsReset handler
 
     statsReset: () => {
       console.log("Received statsReset message, clearing storage");
@@ -313,15 +313,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(() => {
         console.log("Background stats and history have been completely reset");
         
-        // Broadcast reset confirmation to all tabs
+        // Use safer implementation to broadcast to tabs
         chrome.tabs.query({}, function(tabs) {
-          for (const tab of tabs) {
-            try {
-              chrome.tabs.sendMessage(tab.id, {action: "statsResetConfirmed"});
-            } catch (e) {
-              // Ignore errors for tabs that don't have our content script
+          tabs.forEach(tab => {
+            // Skip non-http URLs
+            if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
+              return;
             }
-          }
+            
+            // Try to ping first to check if content script exists
+            chrome.tabs.sendMessage(tab.id, { action: "ping" })
+              .then(response => {
+                if (response && response.status === "pong") {
+                  return chrome.tabs.sendMessage(tab.id, { action: "statsResetConfirmed" });
+                }
+              })
+              .catch(() => {
+                // Silently catch errors - tab doesn't have content script
+              });
+          });
         });
         
         sendResponse({status: "success"});
@@ -798,25 +808,39 @@ async function performFullReset() {
   }
 }
 
-// Function to notify all tabs of reset
+// Replace the notifyAllTabsOfReset function with this improved version
+
 async function notifyAllTabsOfReset() {
   try {
     const tabs = await chrome.tabs.query({});
     
     // Send reset confirmation to all tabs
-    const promises = tabs.map(tab => {
-      return chrome.tabs.sendMessage(tab.id, {
-        action: "completeStatsReset"
-      }).catch(() => {
-        // Ignore errors for tabs without our content script
-      });
-    });
+    for (const tab of tabs) {
+      try {
+        // Skip chrome:// and extension:// URLs
+        if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('edge://'))) {
+          continue;
+        }
+        
+        // First check if the content script is present by sending a ping
+        const response = await chrome.tabs.sendMessage(tab.id, { action: "ping" })
+          .catch(() => null); // Silently catch errors
+        
+        // Only send the reset message if we got a response to our ping
+        if (response && response.status === "pong") {
+          await chrome.tabs.sendMessage(tab.id, { action: "completeStatsReset" })
+            .catch(() => {}); // Ignore errors
+        }
+      } catch (err) {
+        // Ignore individual tab errors
+        console.log(`Skipping message to tab ${tab.id}: ${err.message}`);
+      }
+    }
     
-    await Promise.allSettled(promises);
-    console.log("Reset notification sent to all tabs");
+    console.log("Reset notification sent to applicable tabs");
     return true;
   } catch (error) {
-    console.error("Error notifying tabs of reset:", error);
-    throw error;
+    console.error("Error in notifyAllTabsOfReset:", error);
+    return false; // Don't throw, just return false
   }
 }

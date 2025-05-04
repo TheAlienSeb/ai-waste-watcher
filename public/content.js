@@ -210,6 +210,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // Keep the message channel open for async responses
 });
 
+// Make sure to add a ping handler in your content script
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // For ping requests, just respond immediately
+  if (message.action === "ping") {
+    sendResponse({status: "pong"});
+    return true;
+  }
+  
+  // ... rest of your message handlers
+});
+
 // ======= Core Functions =======
 
 // Define a detector registry object to store all detector functions
