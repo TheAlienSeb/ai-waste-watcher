@@ -41,7 +41,7 @@ wAIsted is a Chrome extension that provides real-time tracking of the cost of us
 
 ## How we built it
 
-We used React, Vite, and Tailwind to build the front end of the Chrome extension. We use TypeScript to implement the math behind each calculation. The biggest challenge we ran into was reading the response tokens from user input.
+We used React, Vite, and Tailwind to build the front end of the Chrome extension. We use JavaScript to implement the math behind each calculation. The biggest challenge we ran into was reading the response tokens from user input.
 
 ## What's next for wAIsted
 
